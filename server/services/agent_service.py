@@ -12,13 +12,16 @@ in that case (see server.main).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import queue as _q
+import re as _re
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, AsyncIterator
 
 from .. import _paths
@@ -368,12 +371,95 @@ class AgentService:
 
     # ── conversation control ────────────────────────────────────
     def new_conversation(self) -> str:
+        # Persist the soon-to-be-discarded WebUI conversation into
+        # memory/chat_history.json so it shows up under "对话管理".
+        # Without this hook chat_history.json is only ever written by the
+        # Qt desktop app (frontends/qtapp.py), and Web sessions stay invisible
+        # in the management view forever.
+        try:
+            self._archive_snapshots_to_chat_history()
+        except Exception as e:
+            log.warning("archive snapshots to chat_history.json failed: %s", e)
         # Wipe per-stream UI snapshots so a reconnecting WS doesn't replay
         # stale bubbles from the previous conversation.
         with self._lock:
             self._snapshots.clear()
         bus.publish("chat:reset", {"reason": "new_conversation"})
         return reset_conversation(self.agent)
+
+    # ---- helpers for archive on /new ----
+    @staticmethod
+    def _strip_webui_prompt_artifacts(s: str) -> str:
+        """Remove the file-marker scaffolding LiveChat appends to user prompts
+        so saved messages read like what the user actually typed."""
+        if not s:
+            return ""
+        # Drop the 'If you need to show files...' preamble injected by LiveChat
+        s = _re.sub(
+            r"^If you need to show files to user, use \[FILE:filepath\] in your response\.\s*",
+            "",
+            s,
+        )
+        # Drop trailing "[用户发送文件: <path>]" markers, possibly multiple
+        s = _re.sub(r"(?:\n|^)\[用户发送文件:[^\]]*\]\s*", "", s)
+        return s.strip()
+
+    def _archive_snapshots_to_chat_history(self) -> None:
+        """Dump the current chat snapshots as one new entry in chat_history.json.
+
+        Schema matches what frontends/qtapp.py writes (so the same file is
+        readable by the Qt app and by /api/conversations):
+
+            {"id", "title", "messages": [{role, content}, ...], "updatedAt"}
+        """
+        with self._lock:
+            snaps = [s for s in self._snapshots.values() if s.done and (s.query or s.content)]
+        if not snaps:
+            return  # nothing meaningful to save
+
+        messages: list[dict] = []
+        first_user_text = ""
+        for snap in snaps:
+            user_text = self._strip_webui_prompt_artifacts(snap.query)
+            if user_text:
+                messages.append({"role": "user", "content": user_text})
+                if not first_user_text:
+                    first_user_text = user_text
+            if snap.content:
+                messages.append({"role": "assistant", "content": snap.content})
+        if not messages:
+            return
+
+        title = (first_user_text[:30].replace("\n", " ") or "Web 对话")
+        if len(first_user_text) > 30:
+            title += "…"
+        entry = {
+            "id": datetime.now().strftime("%Y%m%d_%H%M%S_%f"),
+            "title": title,
+            "messages": messages,
+            "updatedAt": datetime.now().isoformat(),
+            "source": "webui",
+        }
+
+        hf = str(_paths.memory_dir() / "chat_history.json")
+        all_: list[dict] = []
+        if os.path.isfile(hf):
+            try:
+                with open(hf, encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, list):
+                    all_ = loaded
+            except Exception as e:
+                log.warning("chat_history.json unreadable, starting fresh: %s", e)
+        all_.append(entry)
+
+        os.makedirs(os.path.dirname(hf), exist_ok=True)
+        tmp = hf + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(all_, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, hf)
+        log.info("archived webui conversation %s (%d msgs) to chat_history.json",
+                 entry["id"], len(messages))
 
     def get_history(self) -> list[str]:
         return list(getattr(self.agent, "history", []))
