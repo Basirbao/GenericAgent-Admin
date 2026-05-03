@@ -46,6 +46,31 @@ SCRIPT_DIR = _resource_root()
 WEBUI_DIR = SCRIPT_DIR / "webui"
 DIST_INDEX = WEBUI_DIR / "dist" / "index.html"
 
+
+def _helper_executable() -> str | None:
+    """Return path to the nested Helper.app's Mach-O launcher, or None.
+
+    On macOS frozen builds the main bundle ships
+    ``GenericAgent Admin.app/Contents/Frameworks/GenericAgent Admin Helper.app/``
+    whose ``Info.plist`` sets ``LSUIElement=True``. Spawning the backend
+    via the helper's binary instead of ``sys.executable`` keeps the FastAPI
+    subprocess off the Dock — the main app stays the only visible icon.
+
+    Returns ``None`` outside frozen-mac, or when the nested helper isn't
+    present (e.g. ``pyinstaller`` without the helper BUNDLE block, or a
+    dev run). Callers should fall back to ``sys.executable`` in that case.
+    """
+    if not (sys.platform == "darwin" and getattr(sys, "frozen", False)):
+        return None
+    try:
+        main_macos = Path(sys.executable).resolve().parent             # …/Contents/MacOS
+        contents = main_macos.parent                                   # …/Contents
+        helper_app = contents / "Frameworks" / "GenericAgent Admin Helper.app"
+        helper_bin = helper_app / "Contents" / "MacOS" / Path(sys.executable).name
+        return str(helper_bin) if helper_bin.is_file() else None
+    except Exception:
+        return None
+
 BACKEND_HOST = "127.0.0.1"
 BACKEND_PORT = 8765
 LOCK_PORT = BACKEND_PORT + 1   # matches server/run.py:_ensure_single_instance
@@ -348,6 +373,17 @@ def main() -> int:
     # In dev mode this is also a convenient way to run "server only" without
     # a separate entrypoint.
     if "--server-mode" in sys.argv[1:] or os.environ.get("GA_ADMIN_SERVER_MODE") == "1":
+        # Defensive: even though Helper.app's Info.plist sets LSUIElement=True,
+        # this also runs when the launcher itself is started with --server-mode
+        # for headless/dev use. Setting the activation policy to "Prohibited"
+        # (= 2) before any AppKit init ensures we never grab a Dock icon or
+        # steal focus, regardless of which bundle's Info.plist applied.
+        if sys.platform == "darwin":
+            try:
+                from AppKit import NSApplication  # type: ignore
+                NSApplication.sharedApplication().setActivationPolicy_(2)
+            except Exception:
+                pass
         if getattr(sys, "frozen", False):
             # uvicorn does string-import "server.main:app"; ensure the bundle
             # root is on sys.path so that resolves against the frozen modules.
@@ -386,9 +422,13 @@ def main() -> int:
     else:
         print("[Launch] starting backend (server.run)...")
         # Frozen builds re-spawn this same binary with --server-mode (see
-        # main() dispatch). In dev we use the regular Python module form.
+        # main() dispatch). On macOS we prefer the nested Helper.app
+        # launcher (LSUIElement=True) so the backend doesn't show up as
+        # a second Dock icon. Falls back to sys.executable if the helper
+        # isn't bundled (older builds / dev). In dev we use the regular
+        # Python module form.
         if getattr(sys, "frozen", False):
-            backend_cmd = [sys.executable, "--server-mode"]
+            backend_cmd = [_helper_executable() or sys.executable, "--server-mode"]
         else:
             backend_cmd = [sys.executable, "-m", "server.run"]
         backend = _popen(

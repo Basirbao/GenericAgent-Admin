@@ -109,6 +109,49 @@ def discover_ga_root() -> Path | None:
     return None
 
 
+def discover_user_python() -> str | None:
+    """Resolve a system Python suitable for running GA's ``code_run``.
+
+    Why this exists: in a PyInstaller-frozen ``.app`` build, ``sys.executable``
+    points at the bundle's Mach-O launcher, not a real Python. Passing it to
+    ``[sys.executable, "-X", "utf8", "-u", script.py]`` (what ``ga.py:code_run``
+    does) re-launches the GUI launcher with garbage argv — every code_run
+    spawns a fresh Dock icon and never executes the user's code. The fix is
+    to swap argv[0] for an actual ``python3`` interpreter; this helper finds
+    one. Resolution order:
+
+      1. ``$GA_PYTHON`` env override (escape hatch for tests / weird setups)
+      2. saved config: ``python_path`` (UI-configured path, future-proofing)
+      3. ``shutil.which("python3")`` against the parent process's PATH
+      4. macOS Homebrew (Apple Silicon then Intel), pyenv shim, Apple stub
+
+    Returns absolute path, or ``None`` if nothing usable was found. Callers
+    should treat ``None`` as "fall back to ``sys.executable``" — acceptable
+    in dev (where ``sys.executable`` is already a real interpreter) but a
+    fatal misconfiguration in frozen-mac builds.
+    """
+    import shutil
+    env = os.environ.get("GA_PYTHON", "").strip()
+    if env and Path(env).is_file():
+        return env
+    saved = load_config().get("python_path")
+    if saved and Path(str(saved)).is_file():
+        return str(saved)
+    found = shutil.which("python3")
+    if found:
+        return found
+    candidates = [
+        "/opt/homebrew/bin/python3",        # Apple Silicon Homebrew
+        "/usr/local/bin/python3",           # Intel Homebrew / python.org installer
+        f"{Path.home()}/.pyenv/shims/python3",
+        "/usr/bin/python3",                 # Apple stub (last resort, no user pkgs)
+    ]
+    for cand in candidates:
+        if Path(cand).is_file():
+            return cand
+    return None
+
+
 def set_ga_root(path: str) -> Path:
     """Validate path, persist to config, return resolved Path. Raises ValueError on bad input."""
     if not path or not str(path).strip():

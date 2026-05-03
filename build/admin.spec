@@ -142,8 +142,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "GenericAgent Admin",
             "CFBundleDisplayName": "GenericAgent Admin",
-            "CFBundleShortVersionString": "0.2.0",
-            "CFBundleVersion": "0.2.0",
+            "CFBundleShortVersionString": "0.2.7",
+            "CFBundleVersion": "0.2.7",
             "LSUIElement": False,           # show in Dock + menu bar
             "LSMinimumSystemVersion": "11.0",
             "NSHighResolutionCapable": True,
@@ -153,5 +153,34 @@ if sys.platform == "darwin":
             # Without this prompt text the OS shows a generic dialog.
             "NSAppleEventsUsageDescription":
                 "GenericAgent Admin uses System Events to bring its window to the front on first launch.",
+        },
+    )
+
+    # Helper bundle for headless backend subprocesses. Sharing ``coll``
+    # means the same binaries / Python modules are reused — only the
+    # Info.plist differs. The build script (build/build_mac.sh) nests
+    # this .app into the main app's ``Contents/Frameworks/`` so users
+    # only see one bundle in /Applications.
+    #
+    # Why we need it: PyInstaller's frozen launcher inherits the parent
+    # bundle's Info.plist. Spawning ``sys.executable --server-mode`` from
+    # the main .app gives the backend a Dock icon (the user sees what
+    # looks like a duplicate app). The helper has ``LSUIElement=True``
+    # so it stays off the Dock entirely. ``launch_webui.py``'s
+    # ``_helper_executable()`` resolves the nested binary at runtime.
+    helper = BUNDLE(
+        coll,
+        name="GenericAgent Admin Helper.app",
+        icon=None,
+        bundle_identifier="com.genericagent.admin.helper",
+        info_plist={
+            "CFBundleName": "GenericAgent Admin Helper",
+            "CFBundleDisplayName": "GenericAgent Admin Helper",
+            "CFBundleShortVersionString": "0.2.7",
+            "CFBundleVersion": "0.2.7",
+            "LSUIElement": True,            # no Dock icon, no menu bar
+            "LSBackgroundOnly": False,      # still allowed to draw windows if needed
+            "LSMinimumSystemVersion": "11.0",
+            "NSHighResolutionCapable": True,
         },
     )

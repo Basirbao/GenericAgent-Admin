@@ -17,6 +17,7 @@ import logging
 import os
 import queue as _q
 import re as _re
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -37,44 +38,96 @@ from .event_bus import bus  # noqa: E402
 log = logging.getLogger(__name__)
 
 
-# ── Windows: suppress flashing console windows from agent-spawned processes ──
-def _patch_ga_subprocess_for_windows() -> None:
-    """Force CREATE_NO_WINDOW on every subprocess.Popen called from the
-    GA module namespace.
+# ── Suppress GA-spawned subprocess UI side-effects (per-platform) ────────────
+def _patch_ga_subprocess() -> None:
+    """Patch ``ga.subprocess.Popen`` so ``code_run`` doesn't pollute the UI.
 
-    Why: ``GenericAgent/ga.py:code_run`` builds Popen with only
+    Two distinct problems on two platforms, same patch site (GA's module-
+    level ``import subprocess``, see ``ga.py:4`` and the ``subprocess.Popen``
+    call at ``ga.py:52``):
+
+    **Windows** — ``ga.py:code_run`` builds Popen with only
     ``startupinfo.wShowWindow = SW_HIDE``. SW_HIDE is read by the child
-    *after* conhost has already attached a console — when the parent
+    *after* conhost has already attached a console. When the parent
     (this server, started by pythonw / a no-console frozen exe) lacks a
     console of its own, Windows allocates a fresh one for the child and
-    the user sees a black window flash on every code_run.
-    ``CREATE_NO_WINDOW`` (0x08000000) tells the OS not to allocate a
+    the user sees a black window flash on every code_run. Adding
+    ``CREATE_NO_WINDOW`` (0x08000000) tells the OS not to allocate the
     console at all, which is the actual fix.
 
-    We do not edit ``ga.py`` on disk so the GA repo can be updated
-    independently. Instead we override the Popen reference inside ga's
-    module namespace at import time.
+    **macOS frozen .app** — ``ga.py:27`` builds
+    ``[sys.executable, "-X", "utf8", "-u", tmp]`` to run user Python.
+    In a PyInstaller-frozen ``.app`` build, ``sys.executable`` points at
+    the bundle's Mach-O launcher, not Python. The launcher inherits the
+    GUI ``Info.plist`` so each spawn shows up as a fresh Dock icon, and
+    ``-X``/``-u`` aren't understood — argv just gets fed back into
+    ``launch_webui.pyw:main`` which fails to run the user's code. Fix:
+    rewrite ``argv[0]`` to a real ``python3`` interpreter discovered by
+    ``_paths.discover_user_python()``. We don't touch the helper-app
+    path because user code routinely imports user-pip-installed packages
+    (numpy, requests, …) that the frozen interpreter doesn't have.
+
+    Patching strategy is the same on both: override the ``Popen``
+    reference inside ``ga``'s module namespace at admin-startup time, so
+    the GA repo stays untouched on disk and ``git pull`` on GA never
+    conflicts with admin.
     """
-    if os.name != "nt":
+    if os.name == "nt":
+        try:
+            import ga as _ga  # type: ignore  # resolved via GA sys.path
+            import subprocess as _sp
+            _orig_popen = _sp.Popen
+            CREATE_NO_WINDOW = 0x08000000
+
+            def _no_window_popen(*args, **kwargs):
+                cf = kwargs.get("creationflags") or 0
+                kwargs["creationflags"] = cf | CREATE_NO_WINDOW
+                return _orig_popen(*args, **kwargs)
+
+            _ga.subprocess.Popen = _no_window_popen
+            log.info("patched ga.subprocess.Popen with CREATE_NO_WINDOW")
+        except Exception:
+            log.exception("could not patch ga.subprocess.Popen — code_run may flash console windows")
+        return
+
+    if sys.platform != "darwin" or not getattr(sys, "frozen", False):
+        # Dev mode (running from source) on macOS or Linux: sys.executable
+        # is already a real Python interpreter. Nothing to fix.
+        return
+
+    # macOS frozen .app: swap argv[0] off the bundle launcher.
+    from .. import _paths
+    real_python = _paths.discover_user_python()
+    if not real_python:
+        log.error(
+            "macOS frozen build: no system python3 found for GA code_run. "
+            "Install Python 3.10+ (https://www.python.org) or set $GA_PYTHON. "
+            "code_run will fall back to sys.executable and likely fail."
+        )
         return
     try:
         import ga as _ga  # type: ignore  # resolved via GA sys.path
         import subprocess as _sp
         _orig_popen = _sp.Popen
-        CREATE_NO_WINDOW = 0x08000000
+        _frozen_exe = sys.executable
 
-        def _no_window_popen(*args, **kwargs):
-            cf = kwargs.get("creationflags") or 0
-            kwargs["creationflags"] = cf | CREATE_NO_WINDOW
+        def _swap_popen(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args")
+            if isinstance(cmd, (list, tuple)) and cmd and cmd[0] == _frozen_exe:
+                new_cmd = [real_python, *cmd[1:]]
+                if args:
+                    args = (new_cmd, *args[1:])
+                else:
+                    kwargs["args"] = new_cmd
             return _orig_popen(*args, **kwargs)
 
-        _ga.subprocess.Popen = _no_window_popen
-        log.info("patched ga.subprocess.Popen with CREATE_NO_WINDOW")
+        _ga.subprocess.Popen = _swap_popen
+        log.info("patched ga.subprocess.Popen to use %s for code_run", real_python)
     except Exception:
-        log.exception("could not patch ga.subprocess.Popen — code_run may flash console windows")
+        log.exception("could not patch ga.subprocess.Popen for macOS frozen build")
 
 
-_patch_ga_subprocess_for_windows()
+_patch_ga_subprocess()
 
 
 @dataclass
