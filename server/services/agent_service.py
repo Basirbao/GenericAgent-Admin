@@ -116,13 +116,6 @@ class ChatSnapshot:
 class AgentService:
     _instance: "AgentService | None" = None
     _SNAPSHOT_CAP = 20  # keep last N submissions for /ws/chat replay
-    # Per-stream content cap for completed streams in the initial /ws/chat
-    # snapshot. Heavy multi-turn agent runs can produce 100KB+ of text per
-    # stream; sending the full text for every snapshot blocks the WebView's
-    # JS main thread for several seconds on launch ("can't click for ~5s").
-    # In-flight streams are still sent in full so the live conversation
-    # rebuilds correctly.
-    _SNAPSHOT_CONTENT_CAP = 6000
 
     def __init__(self) -> None:
         # Patch /continue and /new before instantiating
@@ -369,15 +362,8 @@ class AgentService:
         out: list[dict] = []
         with self._lock:
             snaps = list(self._snapshots.values())
-        cap = self._SNAPSHOT_CONTENT_CAP
         for snap in snaps:
             content = snap.content
-            # Only truncate already-finished streams. Live ones keep full text
-            # so the user sees current progress correctly on reconnect.
-            if snap.done and content and len(content) > cap:
-                head = content[: cap // 3]
-                tail = content[-(cap - cap // 3 - 80):]
-                content = f"{head}\n\n…[truncated {len(snap.content) - cap} chars for fast reload]…\n\n{tail}"
             out.append({
                 "stream_id": snap.stream_id,
                 "source": snap.source,

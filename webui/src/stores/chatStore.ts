@@ -37,6 +37,7 @@ interface ChatState {
   msgs: ChatMsg[]
   conn: 'connecting' | 'open' | 'closed'
   streaming: boolean              // true if any stream still receiving
+  hydrating: boolean              // true between connect and first snapshot apply
   sock: ChatSocket | null
 
   start: () => void
@@ -151,12 +152,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
   msgs: [],
   conn: 'connecting',
   streaming: false,
+  hydrating: true,
   sock: null,
 
   start: () => {
     if (get().sock) return
     const sock = new ChatSocket()
-    sock.onState = (s) => set({ conn: s })
+    sock.onState = (s) => {
+      set({ conn: s })
+      if (s === 'connecting') set({ hydrating: true })
+    }
     sock.onMessage = (m) => {
       // The very first message after connect is the chat-state snapshot. If
       // the user has been heavy-chatting, parsing + rendering it synchronously
@@ -168,7 +173,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (m.type === 'snapshot') {
         const apply = () => set((st) => {
           const msgs = applyEvent(st.msgs, m)
-          return { msgs, streaming: anyStreaming(msgs) }
+          return { msgs, streaming: anyStreaming(msgs), hydrating: false }
         })
         if (typeof requestAnimationFrame === 'function') {
           requestAnimationFrame(() => requestAnimationFrame(apply))

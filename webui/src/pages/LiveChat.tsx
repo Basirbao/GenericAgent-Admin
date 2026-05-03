@@ -34,6 +34,7 @@ export function LiveChat() {
   const msgs = useChatStore((s) => s.msgs)
   const streaming = useChatStore((s) => s.streaming)
   const conn = useChatStore((s) => s.conn)
+  const hydrating = useChatStore((s) => s.hydrating)
   const submitWebui = useChatStore((s) => s.submitWebui)
   const abortFn = useChatStore((s) => s.abort)
   const clearLocal = useChatStore((s) => s.clearLocal)
@@ -205,7 +206,13 @@ export function LiveChat() {
     >
       <div className="flex flex-col h-full relative">
         <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
-          {msgs.length === 0 && (
+          {hydrating && msgs.length === 0 && (
+            <div className="h-full flex flex-col items-center justify-center gap-3 text-slate-500 text-sm">
+              <div className="w-6 h-6 rounded-full border-2 border-slate-600 border-t-accent animate-spin" />
+              <div>正在恢复历史对话…</div>
+            </div>
+          )}
+          {!hydrating && msgs.length === 0 && (
             <div className="h-full flex items-center justify-center text-slate-500 text-sm">
               开始一段对话，或粘贴一张图问个问题。
             </div>
