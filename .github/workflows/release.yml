@@ -49,8 +49,14 @@ jobs:
           cache: npm
           cache-dependency-path: webui/package-lock.json
 
-      - name: Install pyinstaller
-        run: python -m pip install --upgrade "pyinstaller>=6.0"
+      - name: Install Python dependencies
+        # Install project deps (FastAPI / uvicorn / pywebview / apscheduler /
+        # PIL / etc.) plus pyinstaller. Without this, pyinstaller can't see
+        # the modules and emits "Hidden import not found" for everything.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install --upgrade "pyinstaller>=6.0"
 
       # ── platform-specific installer tooling ──────────────────────
       - name: Install create-dmg (mac)
@@ -60,6 +66,18 @@ jobs:
       - name: Install Inno Setup (win)
         if: runner.os == 'Windows'
         run: choco install innosetup -y --no-progress
+
+      - name: Add ChineseSimplified.isl to Inno Setup (win)
+        # Inno Setup's bundled Languages\ folder doesn't include Chinese
+        # Simplified; we ship our own fetch from jrsoftware.org's official
+        # unofficial-translations index so the [Languages] entry resolves.
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url = "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl"
+          $dst = "C:\Program Files (x86)\Inno Setup 6\Languages\ChineseSimplified.isl"
+          Invoke-WebRequest -Uri $url -OutFile $dst -UseBasicParsing
+          Write-Host "Downloaded $((Get-Item $dst).Length) bytes to $dst"
 
       # ── build ───────────────────────────────────────────────────
       - name: Build (mac)
