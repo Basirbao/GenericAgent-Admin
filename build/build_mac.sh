@@ -62,6 +62,29 @@ else
     echo "         (Dock will show a second icon for the FastAPI subprocess)" >&2
 fi
 
+echo "==> [3.6/4] Ad-hoc codesign (helper bundle first, then outer)"
+# Why this exists: admin.spec sets codesign_identity=None, so PyInstaller
+# leaves the bundles unsigned. Pre-v0.2.7 (single bundle) macOS was lax —
+# Gatekeeper just blocked the first launch and the user could right-click
+# → Open. With the nested Helper.app, an unsigned outer + unsigned inner
+# trips a stricter check and macOS shows "is damaged and can't be opened",
+# urging the user to trash the app. Ad-hoc signing (identity "-") doesn't
+# require an Apple Developer account, doesn't bypass Gatekeeper for
+# downloaded files (notarization still required for that), but it makes
+# the bundle structurally valid so macOS stops misdiagnosing it as
+# damaged. Users still right-click → Open on first launch (one time).
+#
+# Order matters: deep-signing the outer bundle re-walks nested bundles, so
+# we sign the helper first, then the outer with --deep to seal the result.
+HELPER_INSIDE="$APP/Contents/Frameworks/GenericAgent Admin Helper.app"
+if [ -d "$HELPER_INSIDE" ]; then
+    codesign --force --deep --sign - --timestamp=none "$HELPER_INSIDE"
+fi
+codesign --force --deep --sign - --timestamp=none "$APP"
+if ! codesign --verify --verbose=2 "$APP" 2>&1 | tail -3; then
+    echo "WARNING: codesign verify reported issues; users may still see 'damaged'" >&2
+fi
+
 echo "==> [4/4] Wrapping into .dmg"
 if ! command -v create-dmg >/dev/null; then
     echo "    create-dmg missing. Install with: brew install create-dmg" >&2

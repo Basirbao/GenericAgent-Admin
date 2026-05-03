@@ -142,8 +142,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "GenericAgent Admin",
             "CFBundleDisplayName": "GenericAgent Admin",
-            "CFBundleShortVersionString": "0.2.7",
-            "CFBundleVersion": "0.2.7",
+            "CFBundleShortVersionString": "0.2.8",
+            "CFBundleVersion": "0.2.8",
             "LSUIElement": False,           # show in Dock + menu bar
             "LSMinimumSystemVersion": "11.0",
             "NSHighResolutionCapable": True,
@@ -176,8 +176,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "GenericAgent Admin Helper",
             "CFBundleDisplayName": "GenericAgent Admin Helper",
-            "CFBundleShortVersionString": "0.2.7",
-            "CFBundleVersion": "0.2.7",
+            "CFBundleShortVersionString": "0.2.8",
+            "CFBundleVersion": "0.2.8",
             "LSUIElement": True,            # no Dock icon, no menu bar
             "LSBackgroundOnly": False,      # still allowed to draw windows if needed
             "LSMinimumSystemVersion": "11.0",
