@@ -71,7 +71,8 @@ def _wait_url(url: str, timeout: float = 30.0) -> bool:
     return False
 
 
-def _popen(cmd: list[str], cwd: Path, env_extra: dict | None = None) -> subprocess.Popen:
+def _popen(cmd: list[str], cwd: Path, env_extra: dict | None = None,
+           log_path: Path | None = None) -> subprocess.Popen:
     kwargs: dict = {"cwd": str(cwd)}
     if env_extra:
         env = os.environ.copy()
@@ -79,6 +80,17 @@ def _popen(cmd: list[str], cwd: Path, env_extra: dict | None = None) -> subproce
         kwargs["env"] = env
     if os.name == "nt":
         kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+    if log_path is not None:
+        # In frozen .app / .pyw builds stdout & stderr go to /dev/null —
+        # impossible to debug post-mortem. Pipe both to a rolling log file
+        # in ADMIN_DATA so we always have a traceback to read after a 500.
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            f = open(log_path, "ab", buffering=0)
+            kwargs["stdout"] = f
+            kwargs["stderr"] = f
+        except Exception as e:
+            print(f"[Launch] could not open backend log {log_path}: {e}", file=sys.stderr)
     return subprocess.Popen(cmd, **kwargs)
 
 
@@ -383,6 +395,7 @@ def main() -> int:
             backend_cmd,
             cwd=SCRIPT_DIR,
             env_extra=env_extra,
+            log_path=Path.home() / ".genericagent-admin" / "backend.log",
         )
         atexit.register(lambda: _safe_term(backend))
         # SIGINT / SIGTERM handler so terminal Ctrl+C tears the child down

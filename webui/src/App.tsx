@@ -38,7 +38,7 @@ export default function App() {
   useDesktopNotifyEffects()
 
   // Probe setup status — if backend has no GA_ROOT, force the Settings page
-  const { data: setup, isLoading } = useQuery({
+  const { data: setup, isLoading, isError, error, refetch, failureCount } = useQuery({
     queryKey: ['setup'],
     queryFn: api.setupStatus,
     refetchInterval: (query) => {
@@ -58,10 +58,40 @@ export default function App() {
     }
   }, [setup?.configured, start, stop, chatStart, chatStop])
 
+  // Persistent backend error: show actionable fallback instead of an
+  // infinite "正在连接后端…" spinner. retry: 1 in main.tsx means after
+  // 2 attempts isLoading flips false; without this branch the SPA would
+  // silently fall through to setup mode with no hint about what failed.
+  if (isError && !setup) {
+    const msg = (error as { message?: string } | null)?.message || String(error || 'unknown')
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-bg">
+        <div className="max-w-md text-center space-y-4 px-6">
+          <div className="text-rose-400 text-base font-medium">无法连接后端</div>
+          <div className="text-slate-400 text-sm break-all whitespace-pre-wrap font-mono bg-bg-card border border-line rounded-lg p-3">
+            {msg}
+          </div>
+          <div className="text-slate-500 text-xs">
+            已尝试 {failureCount} 次。后端可能仍在启动，或某个路由抛了异常。
+          </div>
+          <button
+            onClick={() => refetch()}
+            className="px-4 py-2 rounded-lg bg-accent text-white text-sm hover:brightness-110"
+          >
+            重试
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   if (isLoading) {
     return (
       <div className="flex h-screen w-screen items-center justify-center text-slate-500 text-sm">
-        正在连接后端…
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-6 h-6 rounded-full border-2 border-slate-600 border-t-accent animate-spin" />
+          <div>正在连接后端…</div>
+        </div>
       </div>
     )
   }

@@ -68,14 +68,25 @@ def _setup_router() -> APIRouter:
 
     @r.get("/status")
     async def setup_status():
+        # Per-path try/except so a single broken path (e.g. an unmounted
+        # volume on macOS, a permission error on Windows) doesn't 500 the
+        # whole endpoint and leave the SPA stuck on "正在连接后端…".
+        candidates = []
+        try:
+            for c in _paths.candidate_paths():
+                try:
+                    candidates.append({"path": str(c), "valid": _paths.is_valid_ga_root(c)})
+                except Exception as e:
+                    log.warning("candidate_paths probe failed for %r: %s", c, e)
+                    candidates.append({"path": str(c), "valid": False, "error": str(e)})
+        except Exception as e:
+            log.exception("candidate_paths enumeration failed")
+            candidates = [{"path": "<error>", "valid": False, "error": str(e)}]
         return {
             "configured": _paths.GA_ROOT is not None,
             "ga_root": str(_paths.GA_ROOT) if _paths.GA_ROOT else None,
             "admin_data": str(_paths.ADMIN_DATA),
-            "candidates": [
-                {"path": str(c), "valid": _paths.is_valid_ga_root(c)}
-                for c in _paths.candidate_paths()
-            ],
+            "candidates": candidates,
         }
 
     @r.post("/validate")
