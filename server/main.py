@@ -120,9 +120,19 @@ def _mount_static(app: FastAPI) -> None:
 
     app.mount("/assets", StaticFiles(directory=str(WEBUI_DIST / "assets")), name="assets")
 
+    # `index.html` MUST NOT be cached. Vite emits hashed asset filenames
+    # (e.g. /assets/index-zHuouAyB.js) and the index points at the current
+    # hash — if WKWebView/Edge serves a stale cached index after a rebuild,
+    # the browser will request a hash that no longer exists, fall through
+    # to the SPA catch-all, and end up parsing HTML as JS. Symptom seen in
+    # the wild: half-mounted React tree, sidebar NavLink stuck on "/".
+    # The hashed assets themselves are immutable so they can be cached
+    # aggressively (StaticFiles default is fine).
+    _NO_CACHE = {"Cache-Control": "no-store, must-revalidate"}
+
     @app.get("/", include_in_schema=False)
     async def _root():
-        return FileResponse(str(WEBUI_DIST / "index.html"))
+        return FileResponse(str(WEBUI_DIST / "index.html"), headers=_NO_CACHE)
 
     @app.get("/{path:path}", include_in_schema=False)
     async def _spa(path: str):
@@ -131,7 +141,7 @@ def _mount_static(app: FastAPI) -> None:
             return FileResponse(str(full))
         idx = WEBUI_DIST / "index.html"
         if idx.is_file():
-            return FileResponse(str(idx))
+            return FileResponse(str(idx), headers=_NO_CACHE)
         return JSONResponse({"detail": "not found"}, status_code=404)
 
 

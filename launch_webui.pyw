@@ -242,25 +242,29 @@ def _kill_pid(pid: int) -> bool:
 
 
 def _cleanup_stale_backend() -> None:
-    """If our backend ports are held but the existing instance is unhealthy
-    (no /api/status response), force-kill the holders so we can rebind.
+    """Force-kill ANY process holding our backend ports, healthy or not.
 
-    A *healthy* prior instance is left alone — ``main()`` will reuse it via
-    ``_backend_alive()``. This means:
-      • clean Ctrl+C exits → ports already free → no-op.
-      • zombie / wedged backend → killed automatically.
-      • another tab already running fine → reused, never killed.
+    Earlier versions reused a healthy prior backend to make double-launch
+    cheap. That turned out to be the root cause of two user-visible bugs:
+      1. Each `start.command` double-click spawned a brand-new pywebview
+         window pointing at the old backend → multiple "GenericAgent-Admin"
+         dock icons piling up.
+      2. The new pywebview's WKWebView would happily serve stale, cached
+         JS bundles from the old backend's `webui/dist`. After a rebuild,
+         hash-mismatched assets would render with a half-mounted React
+         tree — most visibly the sidebar NavLink stuck highlighting "/".
+    A clean kill-and-respawn is cheap (~1 s) and eliminates both. The cost
+    is that a second launch invalidates whichever window is currently
+    open — that's an acceptable trade for a stable cold-start experience.
     """
-    if _backend_alive():
-        return  # healthy — reuse, don't touch
     holders = list(dict.fromkeys(
         _find_port_holders(BACKEND_PORT) + _find_port_holders(LOCK_PORT)
     ))
     if not holders:
         return
     print(
-        f"[Launch] stale backend on port {BACKEND_PORT}/{LOCK_PORT} "
-        f"(PIDs {holders}); cleaning up…",
+        f"[Launch] prior backend on port {BACKEND_PORT}/{LOCK_PORT} "
+        f"(PIDs {holders}); killing for fresh start…",
         file=sys.stderr,
     )
     for pid in holders:
@@ -413,61 +417,61 @@ def main() -> int:
     backend: subprocess.Popen | None = None
     env_extra = {"GA_ROOT": ga_root} if ga_root else None
 
-    # Auto-collect zombies from a previous Ctrl+C / crashed run before we
-    # try to bind. Healthy backends are left alone (reused below).
+    # Always force a fresh backend: kill whatever is on our ports, then
+    # spawn a new server.run. Reusing a "healthy" prior backend was the
+    # root cause of two compounding bugs — see _cleanup_stale_backend().
+    # Cost is a ~1 s respawn; benefit is no stale-asset / orphan-window
+    # situations.
     _cleanup_stale_backend()
 
-    if _backend_alive():
-        print(f"[Launch] backend already running at {BACKEND_URL}, reusing it")
+    print("[Launch] starting backend (server.run)...")
+    # Frozen builds re-spawn this same binary with --server-mode (see
+    # main() dispatch). On macOS we prefer the nested Helper.app
+    # launcher (LSUIElement=True) so the backend doesn't show up as
+    # a second Dock icon. Falls back to sys.executable if the helper
+    # isn't bundled (older builds / dev). In dev we use the regular
+    # Python module form.
+    if getattr(sys, "frozen", False):
+        backend_cmd = [_helper_executable() or sys.executable, "--server-mode"]
     else:
-        print("[Launch] starting backend (server.run)...")
-        # Frozen builds re-spawn this same binary with --server-mode (see
-        # main() dispatch). On macOS we prefer the nested Helper.app
-        # launcher (LSUIElement=True) so the backend doesn't show up as
-        # a second Dock icon. Falls back to sys.executable if the helper
-        # isn't bundled (older builds / dev). In dev we use the regular
-        # Python module form.
-        if getattr(sys, "frozen", False):
-            backend_cmd = [_helper_executable() or sys.executable, "--server-mode"]
-        else:
-            backend_cmd = [sys.executable, "-m", "server.run"]
-        backend = _popen(
-            backend_cmd,
-            cwd=SCRIPT_DIR,
-            env_extra=env_extra,
-            log_path=Path.home() / ".genericagent-admin" / "backend.log",
-        )
-        atexit.register(lambda: _safe_term(backend))
-        # SIGINT / SIGTERM handler so terminal Ctrl+C tears the child down
-        # too — without this, pywebview's main loop sometimes swallows the
-        # signal and the backend orphan keeps holding the lock port.
-        # We just call sys.exit so registered atexit handlers fire (which
-        # already terminate backend + dev_proc).
-        def _on_signal(signum, _frame):
-            print(f"\n[Launch] received signal {signum}; shutting down…",
-                  file=sys.stderr)
-            sys.exit(130 if signum == signal.SIGINT else 143)
-        for _sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                signal.signal(_sig, _on_signal)
-            except (ValueError, OSError):
-                # Signals not settable in some embedded contexts; ignore.
-                pass
+        backend_cmd = [sys.executable, "-m", "server.run"]
+    backend = _popen(
+        backend_cmd,
+        cwd=SCRIPT_DIR,
+        env_extra=env_extra,
+        log_path=Path.home() / ".genericagent-admin" / "backend.log",
+    )
+    atexit.register(lambda: _safe_term(backend))
+    # SIGINT / SIGTERM handler so terminal Ctrl+C tears the child down
+    # too — without this, pywebview's main loop sometimes swallows the
+    # signal and the backend orphan keeps holding the lock port.
+    # We just call sys.exit so registered atexit handlers fire (which
+    # already terminate backend + dev_proc).
+    def _on_signal(signum, _frame):
+        print(f"\n[Launch] received signal {signum}; shutting down…",
+              file=sys.stderr)
+        sys.exit(130 if signum == signal.SIGINT else 143)
+    for _sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(_sig, _on_signal)
+        except (ValueError, OSError):
+            # Signals not settable in some embedded contexts; ignore.
+            pass
 
-        if not _wait_url(f"{BACKEND_URL}/api/status", timeout=40):
-            print("[Launch] backend failed to start within 40s", file=sys.stderr)
-            rc = backend.poll() if backend else None
-            if rc is not None:
-                print(f"[Launch] server.run exited with code {rc}", file=sys.stderr)
-                print(
-                    "[Launch] hint: another copy of server.run may be holding the port.\n"
-                    "        macOS/Linux:  lsof -iTCP:8765 -iTCP:8766 -sTCP:LISTEN  →  kill -9 <PID>\n"
-                    "        Windows:      netstat -ano | findstr :8766",
-                    file=sys.stderr,
-                )
-            _safe_term(backend)
-            return 2
-        print(f"[Launch] backend ready at {BACKEND_URL}")
+    if not _wait_url(f"{BACKEND_URL}/api/status", timeout=40):
+        print("[Launch] backend failed to start within 40s", file=sys.stderr)
+        rc = backend.poll() if backend else None
+        if rc is not None:
+            print(f"[Launch] server.run exited with code {rc}", file=sys.stderr)
+            print(
+                "[Launch] hint: another copy of server.run may be holding the port.\n"
+                "        macOS/Linux:  lsof -iTCP:8765 -iTCP:8766 -sTCP:LISTEN  →  kill -9 <PID>\n"
+                "        Windows:      netstat -ano | findstr :8766",
+                file=sys.stderr,
+            )
+        _safe_term(backend)
+        return 2
+    print(f"[Launch] backend ready at {BACKEND_URL}")
 
     # decide UI source
     target_url = BACKEND_URL
