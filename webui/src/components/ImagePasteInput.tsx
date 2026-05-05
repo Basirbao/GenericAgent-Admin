@@ -23,15 +23,30 @@ interface Props {
   placeholder?: string
   disabled?: boolean
   acceptFiles?: boolean
+  /** Auto-focus the textarea when mounted. Default true so chat-style
+   *  surfaces (LiveChat, WechatBot reply box) start ready-to-type. */
+  autoFocus?: boolean
 }
 
 export function ImagePasteInput({
   text, onText, attachments, onAttachments, onSubmit,
   placeholder = '输入消息，可粘贴/拖放图片或文件…',
-  disabled, acceptFiles = true,
+  disabled, acceptFiles = true, autoFocus = true,
 }: Props) {
   const taRef = useRef<HTMLTextAreaElement>(null)
+  // IME guard: a state mirror keeps render in sync, but the source of truth
+  // for the keydown handler is `composingRef` — state updates are batched
+  // and the keydown can fire in the same tick as compositionend before the
+  // re-render lands.
   const [composing, setComposing] = useState(false)
+  const composingRef = useRef(false)
+  // macOS WKWebView + 中文输入法 occasionally fires keydown(Enter) AFTER
+  // compositionend within the same microtask — at that point isComposing
+  // is already false and `composing` state has flipped, so an Enter that
+  // was meant to commit IME selection slips through and submits the half-
+  // typed message. We record the last compositionend timestamp and reject
+  // any Enter that lands within ~80ms of it.
+  const lastCompEndRef = useRef(0)
   const [dragOver, setDragOver] = useState(false)
   const [uploading, setUploading] = useState(0)
 
@@ -42,6 +57,31 @@ export function ImagePasteInput({
     el.style.height = 'auto'
     el.style.height = Math.min(el.scrollHeight, 240) + 'px'
   }, [text])
+
+  // Auto-focus on mount + every time we re-enable. Mount focus matters
+  // when the user navigates to /chat — pywebview/WKWebView may not have
+  // promoted the window to key yet, so we also retry once a frame later.
+  // The disabled→false trigger covers the case where the agent finishes
+  // streaming: the textarea unlocks, and we want the cursor back so the
+  // user can keep typing without clicking.
+  const wasDisabled = useRef(disabled)
+  useEffect(() => {
+    if (!autoFocus) return
+    const justReEnabled = wasDisabled.current && !disabled
+    wasDisabled.current = !!disabled
+    if (disabled) return
+    const el = taRef.current
+    if (!el) return
+    el.focus()
+    // Initial mount + re-enable both deserve the rAF retry; cheap.
+    const r = requestAnimationFrame(() => el.focus())
+    if (justReEnabled) {
+      // Place caret at the end so re-focus doesn't lose typing position.
+      const len = el.value.length
+      try { el.setSelectionRange(len, len) } catch {}
+    }
+    return () => cancelAnimationFrame(r)
+  }, [disabled, autoFocus])
 
   const upload = async (files: File[]) => {
     if (!files.length) return
@@ -118,8 +158,15 @@ export function ImagePasteInput({
           rows={1}
           placeholder={placeholder}
           onChange={(e) => onText(e.target.value)}
-          onCompositionStart={() => setComposing(true)}
-          onCompositionEnd={() => setComposing(false)}
+          onCompositionStart={() => {
+            composingRef.current = true
+            setComposing(true)
+          }}
+          onCompositionEnd={() => {
+            composingRef.current = false
+            lastCompEndRef.current = Date.now()
+            setComposing(false)
+          }}
           onPaste={(e) => {
             const items = Array.from(e.clipboardData.items || [])
             const files: File[] = []
@@ -135,10 +182,23 @@ export function ImagePasteInput({
             }
           }}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey && !composing && !e.nativeEvent.isComposing) {
-              e.preventDefault()
-              if (!disabled) onSubmit()
-            }
+            if (e.key !== 'Enter' || e.shiftKey) return
+            // Belt-and-braces IME guard. Any of these means "this Enter is
+            // for IME selection, not for submitting":
+            //   • React state says we're composing
+            //   • ref mirror says we're composing (state hasn't flushed)
+            //   • DOM-level isComposing flag (most reliable on Chromium)
+            //   • Safari/WKWebView quirk: keyCode 229 indicates IME
+            //   • we just exited composition — racing keydown sneaks through
+            const isImeEnter =
+              composing
+              || composingRef.current
+              || e.nativeEvent.isComposing
+              || e.keyCode === 229
+              || (Date.now() - lastCompEndRef.current < 80)
+            if (isImeEnter) return  // let textarea consume Enter normally
+            e.preventDefault()
+            if (!disabled) onSubmit()
           }}
           className="flex-1 bg-transparent resize-none outline-none text-slate-200 placeholder:text-slate-500 px-2 py-1 max-h-60"
         />

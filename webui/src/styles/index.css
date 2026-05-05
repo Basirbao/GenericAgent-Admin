@@ -138,6 +138,12 @@ html.light .prose-chat pre code { color: #0f172a; }
 .turn-fold > summary {
   @apply cursor-pointer select-none px-3 py-2 text-sm text-slate-400 hover:text-slate-200;
   list-style: none;
+  /* Long titles (multi-line <summary> from the agent) used to be chopped
+     at 80 chars with an ellipsis. We now show them in full and let the
+     summary line wrap so users can scan agent reasoning at a glance. */
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.5;
 }
 .turn-fold > summary::-webkit-details-marker { display: none; }
 .turn-fold > summary::before {

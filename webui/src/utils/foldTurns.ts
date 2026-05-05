@@ -43,8 +43,16 @@ export function foldTurns(text: string): Segment[] {
         .replace(/`{3,}[\s\S]*?`{3,}/g, '')
         .replace(/<thinking>[\s\S]*?<\/thinking>/g, '')
       const m = /<summary>\s*([\s\S]*?)\s*<\/summary>/.exec(cleaned)
-      let title = m ? m[1].trim().split('\n')[0] : t.marker.replace(/\*+/g, '').trim()
-      if (title.length > 80) title = title.slice(0, 80) + '…'
+      // Title shown on the closed <details>. Earlier versions split on the
+      // first newline AND chopped at 80 chars with an ellipsis. Both
+      // hurt: multi-line <summary> blocks lost everything past line 1,
+      // and longer single-line summaries got truncated to "...". The
+      // <details> already collapses, so the user only sees the title
+      // when they want context — give them the full thing. CSS in
+      // styles/index.css lets summary wrap to multiple lines.
+      const title = m
+        ? m[1].trim().split('\n').map((s) => s.trim()).filter(Boolean).join(' · ')
+        : t.marker.replace(/\*+/g, '').trim()
       segments.push({ type: 'fold', title, content: t.content })
     } else {
       segments.push({ type: 'text', content: (t.marker + t.content) })
