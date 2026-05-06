@@ -580,6 +580,22 @@ def main() -> int:
                 tray.stop()
             except Exception:
                 pass
+        # Belt-and-braces: kill child processes here in addition to the
+        # atexit hooks above. Under Nuitka --windows-console-mode=disable
+        # the GUI subsystem teardown path doesn't always reach atexit
+        # before TerminateProcess fires, leaving the backend subprocess
+        # orphaned and the parent process listed in Task Manager. Calling
+        # _safe_term explicitly while we're still in normal Python land
+        # makes the cleanup deterministic. Healthy reused-backend cases
+        # (backend is None) just no-op here.
+        try:
+            _safe_term(backend)
+        except Exception:
+            pass
+        try:
+            _safe_term(dev_proc)
+        except Exception:
+            pass
     return 0
 
 
@@ -784,7 +800,19 @@ def _try_start_windows_tray(window):
         except Exception as e:
             print(f"[Launch] tray show failed: {e}", file=sys.stderr)
 
+    # Shared flag between _quit and _on_closing. When the user picks "退出"
+    # from the tray menu we set this so the closing handler stops
+    # cancelling destroy events — otherwise window.destroy() below gets
+    # transparently rewritten into window.hide(), webview.start() never
+    # returns, the main thread is stuck, atexit doesn't fire, and the
+    # backend subprocess + GenericAgent-Admin.exe both leak. Mutable
+    # one-element list because Python 3.10 closures can't rebind enclosing
+    # scope without nonlocal, and a single bool would force adding nonlocal
+    # in two places — list mutation is simpler and equally explicit.
+    quitting = [False]
+
     def _quit(icon, item):
+        quitting[0] = True
         try:
             window.destroy()
         except Exception:
@@ -795,8 +823,12 @@ def _try_start_windows_tray(window):
             pass
 
     def _on_closing():
-        # Returning False cancels the default destroy; we hide instead so
-        # the tray icon remains the single way to fully quit.
+        # Default behaviour: cancel destroy, hide instead, so the X button
+        # tucks the app into the tray rather than killing the backend.
+        # Exception: when _quit set ``quitting`` we let destroy proceed
+        # (return True) so webview.start() actually returns.
+        if quitting[0]:
+            return True
         try:
             window.hide()
         except Exception as e:
