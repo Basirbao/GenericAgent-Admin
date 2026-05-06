@@ -47,6 +47,15 @@ if exist build\dist rmdir /s /q build\dist
 if exist build\GenericAgent-Admin-%VERSION%-Setup.exe del /q build\GenericAgent-Admin-%VERSION%-Setup.exe
 
 rem ── 3/4 nuitka ─────────────────────────────────────────────────
+rem We deliberately DO NOT use --enable-plugin=pywebview here. The
+rem bundled plugin in Nuitka 4.0 has two bugs that bite us:
+rem   * it actively excludes webview.platforms.win32 even though
+rem     winforms.py imports it at module load (line 22)
+rem   * any user --include-module/--include-package targeting webview
+rem     is treated as a conflict with the plugin's exclusion list and
+rem     aborts compilation
+rem Listing webview + clr_loader + pythonnet + cffi by hand pulls in
+rem exactly what the runtime needs, no plugin involved, no conflicts.
 rem hiddenimports / data files / excludes mirror what build/admin.spec did
 rem for PyInstaller. Keep them in sync if the project grows new runtime
 rem dependencies (e.g. a new server.routes.* package would need adding via
@@ -65,14 +74,16 @@ python -m nuitka launch_webui.pyw ^
     --windows-console-mode=disable ^
     --output-dir=build\dist ^
     --output-filename=GenericAgent-Admin.exe ^
-    --enable-plugin=pywebview ^
-    --include-module=webview.platforms.win32 ^
-    --no-deployment-flag=excluded-module-usage ^
     --include-package=server ^
     --include-package=uvicorn ^
     --include-package=apscheduler ^
     --include-package=websockets ^
     --include-package=pystray ^
+    --include-package=webview ^
+    --include-package-data=webview ^
+    --include-package=clr_loader ^
+    --include-package=pythonnet ^
+    --include-package=cffi ^
     --include-data-dir=webui\dist=webui\dist ^
     --nofollow-import-to=tkinter ^
     --nofollow-import-to=test ^
