@@ -72,6 +72,7 @@ python -m nuitka launch_webui.pyw ^
     --standalone ^
     --assume-yes-for-downloads ^
     --windows-console-mode=disable ^
+    --windows-icon-from-ico=build\icon.ico ^
     --output-dir=build\dist ^
     --output-filename=GenericAgent-Admin.exe ^
     --disable-plugin=pywebview ^
