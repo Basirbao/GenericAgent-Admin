@@ -66,6 +66,8 @@ python -m nuitka launch_webui.pyw ^
     --output-dir=build\dist ^
     --output-filename=GenericAgent-Admin.exe ^
     --enable-plugin=pywebview ^
+    --include-module=webview.platforms.win32 ^
+    --no-deployment-flag=excluded-module-usage ^
     --include-package=server ^
     --include-package=uvicorn ^
     --include-package=apscheduler ^
