@@ -49,14 +49,24 @@ jobs:
           cache: npm
           cache-dependency-path: webui/package-lock.json
 
-      - name: Install Python dependencies
-        # Install project deps (FastAPI / uvicorn / pywebview / apscheduler /
-        # PIL / etc.) plus pyinstaller. Without this, pyinstaller can't see
-        # the modules and emits "Hidden import not found" for everything.
+      - name: Install Python dependencies (mac)
+        if: runner.os == 'macOS'
+        # PyInstaller is fine on macOS — only the Windows build switched to
+        # Nuitka (to dodge SentinelOne / Defender bootloader heuristics).
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e .
           python -m pip install --upgrade "pyinstaller>=6.0"
+
+      - name: Install Python dependencies (win)
+        if: runner.os == 'Windows'
+        # Nuitka compiles to native C — much lower AV false-positive rate than
+        # PyInstaller. ordered-set + zstandard speed up Nuitka's own internals.
+        shell: cmd
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install --upgrade nuitka ordered-set zstandard
 
       # ── platform-specific installer tooling ──────────────────────
       - name: Install create-dmg (mac)
@@ -78,6 +88,19 @@ jobs:
           $dst = "C:\Program Files (x86)\Inno Setup 6\Languages\ChineseSimplified.isl"
           Invoke-WebRequest -Uri $url -OutFile $dst -UseBasicParsing
           Write-Host "Downloaded $((Get-Item $dst).Length) bytes to $dst"
+
+      - name: Cache Nuitka build (win)
+        # Nuitka caches its C output under %LOCALAPPDATA%\Nuitka\Nuitka\Cache.
+        # On a cold cache the C compile takes 10-15 min; with cache hit it
+        # drops to ~3 min. Key on the entry script + pyproject + this batch
+        # so any dep change invalidates and any unrelated change reuses.
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\Nuitka\Nuitka\Cache
+          key: nuitka-windows-${{ hashFiles('pyproject.toml', 'launch_webui.pyw', 'build/build_win.bat') }}
+          restore-keys: |
+            nuitka-windows-
 
       # ── build ───────────────────────────────────────────────────
       - name: Build (mac)
@@ -104,6 +127,22 @@ jobs:
         run: |
           mkdir -p out
           cp build/GenericAgent-Admin-*-Setup.exe "out/${{ matrix.asset_name }}"
+
+      - name: VirusTotal scan (win)
+        # Uploads the freshly built setup.exe to VirusTotal and prints the
+        # public scan URL into the workflow log. Lets us watch which engines
+        # (still) flag the Nuitka-built binary so we can respond fast if the
+        # ratio creeps back up. Requires the VT_API_KEY repo secret — get
+        # one free at https://www.virustotal.com/gui/my-apikey. Step is
+        # gracefully skipped if the secret isn't set, so forks don't break.
+        if: runner.os == 'Windows' && env.VT_API_KEY != ''
+        env:
+          VT_API_KEY: ${{ secrets.VT_API_KEY }}
+        uses: crazy-max/ghaction-virustotal@v4
+        with:
+          vt_api_key: ${{ secrets.VT_API_KEY }}
+          files: |
+            out/${{ matrix.asset_name }}
 
       - uses: actions/upload-artifact@v4
         with:

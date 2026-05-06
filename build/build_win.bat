@@ -1,18 +1,25 @@
 @echo off
 rem Build a Windows installer (setup.exe) for GenericAgent-Admin.
 rem
+rem Uses Nuitka (compiles to native C) instead of PyInstaller. Trade-off:
+rem ~10x slower build (5-15 min on a clean cache), but the resulting binary
+rem doesn't share PyInstaller's bootloader signature that SentinelOne /
+rem Defender flag as malicious. Inno Setup's [Files] source path is
+rem unchanged, so installer.iss stays as-is.
+rem
 rem Prerequisites (one-time):
 rem   * Python 3.11 or 3.12 with pip on PATH
 rem   * Node.js LTS                                  (for `npm run build`)
 rem   * Inno Setup 6+                                https://jrsoftware.org/isdl.php
-rem   * pyinstaller (auto-installed if missing)
+rem   * MSVC Build Tools (Nuitka downloads MinGW automatically if missing)
+rem   * nuitka (auto-installed if missing)
 rem
 rem Usage:
 rem   build\build_win.bat
 rem
 rem Output:
 rem   build\dist\GenericAgent-Admin\        onedir folder + .exe (run-in-place)
-rem   dist\GenericAgent-Admin-<ver>-Setup.exe   Inno Setup installer
+rem   build\GenericAgent-Admin-<ver>-Setup.exe   Inno Setup installer
 
 setlocal enabledelayedexpansion
 
@@ -39,18 +46,47 @@ if exist build\build rmdir /s /q build\build
 if exist build\dist rmdir /s /q build\dist
 if exist build\GenericAgent-Admin-%VERSION%-Setup.exe del /q build\GenericAgent-Admin-%VERSION%-Setup.exe
 
-rem ── 3/4 pyinstaller ────────────────────────────────────────────
+rem ── 3/4 nuitka ─────────────────────────────────────────────────
+rem hiddenimports / data files / excludes mirror what build/admin.spec did
+rem for PyInstaller. Keep them in sync if the project grows new runtime
+rem dependencies (e.g. a new server.routes.* package would need adding via
+rem --include-package=... since nuitka can't see string-imported modules
+rem any better than PyInstaller could).
 echo.
-echo ==^> [3/4] Running pyinstaller
-python -c "import PyInstaller" 2>nul
+echo ==^> [3/4] Running nuitka
+python -c "import nuitka" 2>nul
 if errorlevel 1 (
-    echo     pyinstaller missing - installing
-    python -m pip install --upgrade "pyinstaller>=6.0" || goto :error
+    echo     nuitka missing - installing
+    python -m pip install --upgrade nuitka ordered-set zstandard || goto :error
 )
-python -m PyInstaller build\admin.spec --noconfirm --workpath build\build --distpath build\dist || goto :error
+python -m nuitka launch_webui.pyw ^
+    --standalone ^
+    --assume-yes-for-downloads ^
+    --windows-console-mode=disable ^
+    --output-dir=build\dist ^
+    --output-filename=GenericAgent-Admin.exe ^
+    --include-package=server ^
+    --include-package=uvicorn ^
+    --include-package=apscheduler ^
+    --include-package=websockets ^
+    --include-package=pystray ^
+    --include-package=webview ^
+    --include-package=clr_loader ^
+    --include-package=pythonnet ^
+    --include-package=cffi ^
+    --include-package-data=webview ^
+    --include-data-dir=webui\dist=webui\dist ^
+    --nofollow-import-to=tkinter ^
+    --nofollow-import-to=test ^
+    --nofollow-import-to=unittest || goto :error
+
+rem Nuitka emits "<entry-script>.dist" — rename to match installer.iss's
+rem expected source path (build\dist\GenericAgent-Admin\).
+if exist build\dist\GenericAgent-Admin rmdir /s /q build\dist\GenericAgent-Admin
+ren build\dist\launch_webui.dist GenericAgent-Admin || goto :error
 
 if not exist "build\dist\GenericAgent-Admin\GenericAgent-Admin.exe" (
-    echo ERROR: GenericAgent-Admin.exe not produced - check pyinstaller log above
+    echo ERROR: GenericAgent-Admin.exe not produced - check nuitka log above
     goto :error
 )
 
