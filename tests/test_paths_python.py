@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from server import _paths
+from server.services import chat_retry
 
 
 def _touch_python(path: Path) -> Path:
@@ -79,6 +80,38 @@ class PythonDiscoveryTests(unittest.TestCase):
             saved = json.loads(config_file.read_text("utf-8"))
             self.assertEqual(saved["ga_root"], str(ga_root.resolve()))
             self.assertEqual(saved["python_path"], str(python_path.resolve()))
+
+
+class ChatRetryConfigTests(unittest.TestCase):
+    def test_classify_recoverable_error_requires_final_ssl_marker(self):
+        match = chat_retry.classify_recoverable_error("partial answer\n!!!Error: SSLError")
+        self.assertIsNotNone(match)
+        self.assertEqual(match.code, "ssl_error")
+
+    def test_classify_recoverable_error_ignores_non_final_marker(self):
+        self.assertIsNone(chat_retry.classify_recoverable_error("!!!Error: SSLError\nRecovered final text"))
+
+    def test_normalize_chat_retry_config_clamps_attempts(self):
+        cfg = chat_retry.normalize_chat_retry_config({"enabled": "false", "max_attempts": 99})
+        self.assertFalse(cfg.enabled)
+        self.assertEqual(cfg.max_attempts, chat_retry.MAX_CONFIG_ATTEMPTS)
+
+    def test_save_chat_retry_config_preserves_existing_admin_config(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            admin_data = root / "admin-data"
+            config_file = admin_data / "config.json"
+            admin_data.mkdir(parents=True)
+            config_file.write_text(json.dumps({"ga_root": "/tmp/ga"}), "utf-8")
+
+            with mock.patch.object(_paths, "ADMIN_DATA", admin_data), \
+                 mock.patch.object(_paths, "CONFIG_FILE", config_file):
+                saved = chat_retry.save_chat_retry_config({"enabled": False, "max_attempts": 3})
+
+            self.assertEqual(saved.to_dict(), {"enabled": False, "max_attempts": 3})
+            config = json.loads(config_file.read_text("utf-8"))
+            self.assertEqual(config["ga_root"], "/tmp/ga")
+            self.assertEqual(config[chat_retry.CONFIG_KEY], {"enabled": False, "max_attempts": 3})
 
 
 if __name__ == "__main__":

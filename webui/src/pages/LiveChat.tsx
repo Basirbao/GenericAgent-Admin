@@ -302,6 +302,9 @@ function sourceLabel(source: string): string {
       return '⏰ [定时任务]'
     case 'auto_continue':
       return '🔁 [自动继续]'
+    case 'chat_error_retry':
+    case 'chat_error_retry_notice':
+      return '[自动重试]'
     default:
       return `[${source}]`
   }

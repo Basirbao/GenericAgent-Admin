@@ -59,6 +59,11 @@ export interface SessionSnapshot {
   rounds: number
 }
 
+export interface ChatRetryConfig {
+  enabled: boolean
+  max_attempts: number
+}
+
 // ── WeChat ────────────────────────────────────────────────
 export interface WxQRState {
   status: string                // idle | waiting_scan | scanning | confirmed | expired | timeout | error
@@ -262,15 +267,28 @@ export interface ChatStreamSnapshot {
   done: boolean
   started_at: number
   finished_at: number
+  logical_id?: string
+  retry_attempt?: number
+  retry_max?: number
+  retry_of?: string
+  retry_reason?: string
+}
+
+export interface ChatRetryReason {
+  code: string
+  label: string
+  marker: string
 }
 
 export type ChatWSOut =
   | { type: 'snapshot'; streams: ChatStreamSnapshot[] }
   | { type: 'reset'; reason?: string }
-  | { type: 'started'; stream_id: string; source?: string; query?: string; ts?: number }
+  | { type: 'started'; stream_id: string; source?: string; query?: string; ts?: number; logical_id?: string; retry_attempt?: number; retry_max?: number; retry_of?: string; retry_reason?: string }
   | { type: 'heartbeat'; stream_id: string }
-  | { type: 'next'; stream_id: string; content: string; source?: string }
-  | { type: 'done'; stream_id: string; content: string; source?: string }
+  | { type: 'next'; stream_id: string; content: string; source?: string; logical_id?: string; retry_attempt?: number; retry_max?: number; retry_of?: string; retry_reason?: string }
+  | { type: 'done'; stream_id: string; content: string; source?: string; logical_id?: string; retry_attempt?: number; retry_max?: number; retry_of?: string; retry_reason?: string }
+  | { type: 'retry'; stream_id: string; source?: string; logical_id?: string; attempt: number; max_attempts: number; reason?: ChatRetryReason; retry_reason?: string }
+  | { type: 'retry_exhausted'; stream_id: string; source?: string; logical_id?: string; attempt: number; max_attempts: number; reason?: ChatRetryReason; retry_reason?: string }
   | { type: 'aborted' }
   | { type: 'pong' }
   | { type: 'error'; error: string }

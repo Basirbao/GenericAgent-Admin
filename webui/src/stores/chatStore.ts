@@ -67,8 +67,32 @@ const isHiddenSource = (s?: string) => !!s && HIDDEN_SOURCES.has(s)
 /** Build the UI msg list from a server snapshot — used on (re)connect. */
 function applySnapshot(streams: ChatStreamSnapshot[]): ChatMsg[] {
   const out: ChatMsg[] = []
+  const seenRetryNotices = new Set<string>()
   for (const s of streams) {
     if (isHiddenSource(s.source)) continue
+    if (s.source === 'chat_error_retry') {
+      const attempt = s.retry_attempt || 0
+      const noticeKey = `${s.logical_id || s.stream_id}:${attempt}`
+      if (!seenRetryNotices.has(noticeKey)) {
+        seenRetryNotices.add(noticeKey)
+        out.push({
+          role: 'assistant',
+          content: `_自动重试请求${s.done ? '已完成' : '进行中'}（${attempt || '?'}${s.retry_max ? `/${s.retry_max}` : ''}${s.retry_reason ? ` · ${s.retry_reason}` : ''}）。_`,
+          streamId: `${s.stream_id}:retry-snapshot`,
+          source: 'chat_error_retry_notice',
+        })
+      }
+      if (s.content || !s.done) {
+        out.push({
+          role: 'assistant',
+          content: s.content,
+          streamId: s.stream_id,
+          source: s.source,
+          streaming: !s.done,
+        })
+      }
+      continue
+    }
     if (s.query) {
       out.push({
         role: 'user',
@@ -104,6 +128,18 @@ function applyEvent(prev: ChatMsg[], evt: ChatWSOut): ChatMsg[] {
     const source = evt.source ?? 'user'
     const query = evt.query ?? ''
     if (isHiddenSource(source)) return prev
+    const retryAttempt = evt.retry_attempt ?? 0
+    if (source === 'chat_error_retry') {
+      const retryKey = evt.logical_id || evt.retry_of || sid
+      const note = `_自动重试请求已开始（${retryAttempt || '?'}${evt.retry_max ? `/${evt.retry_max}` : ''}${evt.retry_reason ? ` · ${evt.retry_reason}` : ''}）。_`
+      const noticeId = `${retryKey}:retry:${retryAttempt}`
+      const next = prev.filter((m) => m.streamId !== noticeId)
+      return [
+        ...next,
+        { role: 'assistant', content: note, streamId: noticeId, source: 'chat_error_retry_notice' },
+        { role: 'assistant', content: '', streamId: sid, source, streaming: true },
+      ]
+    }
     // 1. If our local pre-add bubble is still pending and source is webui,
     //    adopt this stream_id rather than creating a duplicate.
     if (source === 'webui') {
@@ -130,31 +166,74 @@ function applyEvent(prev: ChatMsg[], evt: ChatWSOut): ChatMsg[] {
   if (evt.type === 'next') {
     const sid = evt.stream_id
     if (isHiddenSource(evt.source)) return prev
-    const idx = prev.findIndex((m) => m.role === 'assistant' && m.streamId === sid)
+    const next = ensureRetryStartNotice(prev, evt)
+    const idx = next.findIndex((m) => m.role === 'assistant' && m.streamId === sid)
     if (idx === -1) {
       // started not yet seen — create on the fly
-      return [...prev, { role: 'assistant', content: evt.content, streamId: sid, source: evt.source, streaming: true }]
+      return [...next, { role: 'assistant', content: evt.content, streamId: sid, source: evt.source, streaming: true }]
     }
-    const next = prev.slice()
-    next[idx] = { ...next[idx], content: evt.content, streaming: true }
-    return next
+    const updated = next.slice()
+    updated[idx] = { ...updated[idx], content: evt.content, streaming: true }
+    return updated
   }
   if (evt.type === 'done') {
     const sid = evt.stream_id
     if (isHiddenSource(evt.source)) return prev
-    const idx = prev.findIndex((m) => m.role === 'assistant' && m.streamId === sid)
+    const next = ensureRetryStartNotice(prev, evt)
+    const idx = next.findIndex((m) => m.role === 'assistant' && m.streamId === sid)
     if (idx === -1) {
-      return [...prev, { role: 'assistant', content: evt.content, streamId: sid, source: evt.source, streaming: false }]
+      return [...next, { role: 'assistant', content: evt.content, streamId: sid, source: evt.source, streaming: false }]
     }
-    const next = prev.slice()
-    next[idx] = { ...next[idx], content: evt.content, streaming: false }
-    return next
+    const updated = next.slice()
+    updated[idx] = { ...updated[idx], content: evt.content, streaming: false }
+    return updated
+  }
+  if (evt.type === 'retry') {
+    if (isHiddenSource(evt.source)) return prev
+    const reason = evt.reason?.label || evt.retry_reason || '可恢复错误'
+    const noticeId = `${evt.logical_id || evt.stream_id}:retry:${evt.attempt}`
+    const next = prev.filter((m) => m.streamId !== noticeId)
+    return [
+      ...next,
+      {
+        role: 'assistant',
+        content: `_检测到 ${reason}，正在自动重试（${evt.attempt}/${evt.max_attempts}）。_`,
+        streamId: noticeId,
+        source: 'chat_error_retry_notice',
+      },
+    ]
+  }
+  if (evt.type === 'retry_exhausted') {
+    if (isHiddenSource(evt.source)) return prev
+    const reason = evt.reason?.label || evt.retry_reason || '可恢复错误'
+    return [
+      ...prev,
+      {
+        role: 'assistant',
+        content: `_检测到 ${reason}，但自动重试已达到上限（${evt.max_attempts}/${evt.max_attempts}）。_`,
+        streamId: `${evt.stream_id}:retry-exhausted`,
+        source: 'chat_error_retry_notice',
+      },
+    ]
   }
   if (evt.type === 'aborted') {
     // Mark every still-streaming bubble as finished — server confirmed abort.
     return prev.map((m) => (m.streaming ? { ...m, streaming: false } : m))
   }
   return prev
+}
+
+function ensureRetryStartNotice(prev: ChatMsg[], evt: ChatWSOut): ChatMsg[] {
+  if (evt.type !== 'next' && evt.type !== 'done') return prev
+  if (evt.source !== 'chat_error_retry') return prev
+  const attempt = evt.retry_attempt ?? 0
+  const noticeId = `${evt.logical_id || evt.retry_of || evt.stream_id}:retry:${attempt}`
+  if (prev.some((m) => m.streamId === noticeId)) return prev
+  const note = `_自动重试请求已开始（${attempt || '?'}${evt.retry_max ? `/${evt.retry_max}` : ''}${evt.retry_reason ? ` · ${evt.retry_reason}` : ''}）。_`
+  return [
+    ...prev,
+    { role: 'assistant', content: note, streamId: noticeId, source: 'chat_error_retry_notice' },
+  ]
 }
 
 function anyStreaming(msgs: ChatMsg[]): boolean {

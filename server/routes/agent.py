@@ -7,8 +7,9 @@ import logging
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
-from ..schemas import ChatSubmit, LLMSwitch
+from ..schemas import ChatRetryConfigReq, ChatSubmit, LLMSwitch
 from ..services.agent_service import AgentService
+from ..services.chat_retry import load_chat_retry_config, save_chat_retry_config
 from ..services.event_bus import bus
 
 log = logging.getLogger(__name__)
@@ -39,6 +40,16 @@ async def new_conv():
 @router.get("/api/agent/history")
 async def history():
     return {"history": svc().get_history()}
+
+
+@router.get("/api/agent/chat-retry-config")
+async def get_chat_retry_config():
+    return load_chat_retry_config().to_dict()
+
+
+@router.put("/api/agent/chat-retry-config")
+async def put_chat_retry_config(req: ChatRetryConfigReq):
+    return save_chat_retry_config(req.model_dump()).to_dict()
 
 
 @router.get("/api/agent/sessions")

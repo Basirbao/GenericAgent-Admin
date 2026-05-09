@@ -26,6 +26,11 @@ class LLMSwitch(BaseModel):
     index: int
 
 
+class ChatRetryConfigReq(BaseModel):
+    enabled: bool = True
+    max_attempts: int = Field(default=2, ge=0, le=5)
+
+
 # ── wechat ───────────────────────────────────────────────────────
 class WxSendReq(BaseModel):
     uid: str

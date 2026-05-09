@@ -5,6 +5,7 @@ import type {
   AgentStatus,
   AutonomousRun,
   BusEvent,
+  ChatRetryConfig,
   ChatWSIn,
   ChatWSOut,
   Conversation,
@@ -80,6 +81,9 @@ export const api = {
   agentStatus: () => http<AgentStatus>('GET', '/api/agent/status'),
   agentAbort: () => http<{ ok: boolean }>('POST', '/api/agent/abort'),
   agentNew: () => http<{ ok: boolean; message: string }>('POST', '/api/agent/new'),
+  chatRetryConfig: () => http<ChatRetryConfig>('GET', '/api/agent/chat-retry-config'),
+  saveChatRetryConfig: (cfg: ChatRetryConfig) =>
+    http<ChatRetryConfig>('PUT', '/api/agent/chat-retry-config', cfg),
   agentSessions: () => http<{ sessions: SessionSnapshot[] }>('GET', '/api/agent/sessions'),
   agentRestoreSession: (idx: number) =>
     http<{ ok: boolean; message: string; full: boolean }>('POST', `/api/agent/sessions/${idx}/restore`),

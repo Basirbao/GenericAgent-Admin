@@ -33,6 +33,7 @@ if _paths.GA_ROOT is None:
 from agentmain import GeneraticAgent  # noqa: E402  (resolved via _paths sys.path)
 from frontends.continue_cmd import install as install_continue, reset_conversation  # noqa: E402
 
+from .chat_retry import ChatRetryConfig, classify_recoverable_error, load_chat_retry_config  # noqa: E402
 from .event_bus import bus  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -40,6 +41,10 @@ log = logging.getLogger(__name__)
 _AUTO_CONTINUE_MAX = 2
 _AUTO_CONTINUE_MARKERS = ("[!!! 流异常中断", "[!!! Response truncated: max_tokens")
 _AUTO_CONTINUE_PROMPT = "继续上一条回复，从中断处继续，不要重复已经完成的内容。"
+_ERROR_RETRY_PROMPT_TEMPLATE = (
+    "上一条回复因可恢复的传输/网络错误（{label}）中断。"
+    "请自动重试并从中断处继续，不要重复已经完成的内容。"
+)
 
 
 # ── Suppress GA-spawned subprocess UI side-effects (per-platform) ────────────
@@ -150,7 +155,9 @@ class StreamHandle:
     finished: bool = False
     last_chunk: str = ""
     final_text: str = ""
+    logical_id: str = ""
     auto_continue_count: int = 0
+    error_retry_count: int = 0
 
 
 # ── chat replay snapshot (so a /ws/chat client that reconnects after a tab
@@ -165,6 +172,11 @@ class ChatSnapshot:
     done: bool = False
     finished_at: float = 0.0
     aborted: bool = False
+    logical_id: str = ""
+    retry_attempt: int = 0
+    retry_max: int = 0
+    retry_of: str = ""
+    retry_reason: str = ""
 
 
 class AgentService:
@@ -322,7 +334,12 @@ class AgentService:
         *,
         source: str = "user",
         images: list[str] | None = None,
+        logical_id: str | None = None,
         auto_continue_count: int = 0,
+        error_retry_count: int = 0,
+        retry_of: str = "",
+        retry_reason: str = "",
+        retry_max: int = 0,
     ) -> StreamHandle:
         """Enqueue a task; spawn a single fan-out drainer that publishes
         chat:* events to the bus AND keeps the StreamHandle's display_queue
@@ -336,14 +353,29 @@ class AgentService:
         with self._lock:
             self._next_id += 1
             sid = f"s{self._next_id:08d}"
+        if logical_id is None:
+            logical_id = sid
         # The agent's own queue (drained by our fan-out below).
         src_q = self.agent.put_task(query, source=source, images=images or [])
         # The handle queue we hand to callers (kept in sync by the drainer).
         out_q: "_q.Queue" = _q.Queue()
-        h = StreamHandle(stream_id=sid, display_queue=out_q, auto_continue_count=auto_continue_count)
+        h = StreamHandle(
+            stream_id=sid,
+            display_queue=out_q,
+            logical_id=logical_id,
+            auto_continue_count=auto_continue_count,
+            error_retry_count=error_retry_count,
+        )
         snap = ChatSnapshot(
-            stream_id=sid, source=source, query=query or "",
+            stream_id=sid,
+            source=source,
+            query=query or "",
             started_at=time.time(),
+            logical_id=logical_id,
+            retry_attempt=error_retry_count,
+            retry_max=retry_max,
+            retry_of=retry_of,
+            retry_reason=retry_reason,
         )
         with self._lock:
             self._streams[sid] = h
@@ -351,12 +383,35 @@ class AgentService:
             # LRU eviction
             while len(self._snapshots) > self._SNAPSHOT_CAP:
                 self._snapshots.popitem(last=False)
-        bus.publish("agent:submit", {"stream_id": sid, "source": source, "query_preview": (query or "")[:120]})
-        bus.publish("chat:started", {
-            "stream_id": sid, "source": source,
+        submit_payload = {
+            "stream_id": sid,
+            "source": source,
+            "query_preview": (query or "")[:120],
+            "logical_id": logical_id,
+        }
+        if error_retry_count:
+            submit_payload.update({
+                "retry_attempt": error_retry_count,
+                "retry_max": retry_max,
+                "retry_of": retry_of,
+                "retry_reason": retry_reason,
+            })
+        bus.publish("agent:submit", submit_payload)
+        started_payload = {
+            "stream_id": sid,
+            "source": source,
             "query": query or "",
             "ts": snap.started_at,
-        })
+            "logical_id": logical_id,
+        }
+        if error_retry_count:
+            started_payload.update({
+                "retry_attempt": error_retry_count,
+                "retry_max": retry_max,
+                "retry_of": retry_of,
+                "retry_reason": retry_reason,
+            })
+        bus.publish("chat:started", started_payload)
         threading.Thread(
             target=self._fanout, args=(src_q, out_q, h, snap),
             daemon=True, name=f"agent-fanout-{sid}",
@@ -387,6 +442,11 @@ class AgentService:
                         "stream_id": h.stream_id,
                         "source": snap.source,
                         "content": content,
+                        "logical_id": h.logical_id,
+                        "retry_attempt": snap.retry_attempt,
+                        "retry_max": snap.retry_max,
+                        "retry_of": snap.retry_of,
+                        "retry_reason": snap.retry_reason,
                     })
                 if "done" in item:
                     content = item["done"]
@@ -400,9 +460,16 @@ class AgentService:
                         "stream_id": h.stream_id,
                         "source": snap.source,
                         "content": content,
+                        "logical_id": h.logical_id,
+                        "retry_attempt": snap.retry_attempt,
+                        "retry_max": snap.retry_max,
+                        "retry_of": snap.retry_of,
+                        "retry_reason": snap.retry_reason,
                     })
                     bus.publish("agent:done", {"stream_id": h.stream_id, "len": len(content)})
-                    self._maybe_auto_continue(h, snap, content)
+                    handled_recoverable_error = self._maybe_retry_recoverable_error(h, snap, content)
+                    if not handled_recoverable_error:
+                        self._maybe_auto_continue(h, snap, content)
                     return
         except Exception as e:
             log.exception("fanout crashed for %s: %s", h.stream_id, e)
@@ -413,10 +480,77 @@ class AgentService:
                 "stream_id": h.stream_id,
                 "source": snap.source,
                 "content": snap.content + f"\n[stream error: {e}]",
+                "logical_id": h.logical_id,
+                "retry_attempt": snap.retry_attempt,
+                "retry_max": snap.retry_max,
+                "retry_of": snap.retry_of,
+                "retry_reason": snap.retry_reason,
             })
 
+    def _maybe_retry_recoverable_error(self, h: StreamHandle, snap: ChatSnapshot, content: str) -> bool:
+        if snap.source not in ("user", "webui", "chat_error_retry", "auto_continue", "scheduled_task", "autonomous", "reflect"):
+            return False
+        match = classify_recoverable_error(content)
+        if match is None:
+            return False
+        cfg = self._load_chat_retry_config()
+        if not cfg.enabled or cfg.max_attempts <= 0:
+            return False
+        if h.error_retry_count >= cfg.max_attempts:
+            log.info(
+                "recoverable chat error retry exhausted for %s (%s/%s, %s)",
+                h.stream_id,
+                h.error_retry_count,
+                cfg.max_attempts,
+                match.label,
+            )
+            bus.publish("chat:retry_exhausted", {
+                "stream_id": h.stream_id,
+                "source": snap.source,
+                "logical_id": h.logical_id,
+                "attempt": h.error_retry_count,
+                "max_attempts": cfg.max_attempts,
+                "reason": match.to_dict(),
+            })
+            return True
+        next_count = h.error_retry_count + 1
+        prompt = _ERROR_RETRY_PROMPT_TEMPLATE.format(label=match.label)
+        log.info(
+            "retrying recoverable chat error for %s (%d/%d, %s)",
+            h.stream_id,
+            next_count,
+            cfg.max_attempts,
+            match.label,
+        )
+        bus.publish("chat:retry", {
+            "stream_id": h.stream_id,
+            "source": snap.source,
+            "logical_id": h.logical_id,
+            "attempt": next_count,
+            "max_attempts": cfg.max_attempts,
+            "reason": match.to_dict(),
+        })
+        self.submit(
+            prompt,
+            source="chat_error_retry",
+            logical_id=h.logical_id,
+            auto_continue_count=h.auto_continue_count,
+            error_retry_count=next_count,
+            retry_of=h.stream_id,
+            retry_reason=match.label,
+            retry_max=cfg.max_attempts,
+        )
+        return True
+
+    def _load_chat_retry_config(self) -> ChatRetryConfig:
+        try:
+            return load_chat_retry_config()
+        except Exception as e:
+            log.warning("failed to load chat retry config, using defaults: %s", e)
+            return ChatRetryConfig()
+
     def _maybe_auto_continue(self, h: StreamHandle, snap: ChatSnapshot, content: str) -> None:
-        if snap.source not in ("user", "webui", "auto_continue", "scheduled_task", "autonomous", "reflect"):
+        if snap.source not in ("user", "webui", "auto_continue", "chat_error_retry", "scheduled_task", "autonomous", "reflect"):
             return
         if h.auto_continue_count >= _AUTO_CONTINUE_MAX:
             return
@@ -425,7 +559,16 @@ class AgentService:
             return
         next_count = h.auto_continue_count + 1
         log.info("auto-continuing interrupted stream %s (%d/%d)", h.stream_id, next_count, _AUTO_CONTINUE_MAX)
-        self.submit(_AUTO_CONTINUE_PROMPT, source="auto_continue", auto_continue_count=next_count)
+        self.submit(
+            _AUTO_CONTINUE_PROMPT,
+            source="auto_continue",
+            logical_id=h.logical_id,
+            auto_continue_count=next_count,
+            error_retry_count=h.error_retry_count,
+            retry_of=snap.retry_of,
+            retry_reason=snap.retry_reason,
+            retry_max=snap.retry_max,
+        )
 
     # ── replay (used by /ws/chat on connect) ────────────────────
     def chat_state_snapshot(self) -> list[dict]:
@@ -440,7 +583,7 @@ class AgentService:
             snaps = list(self._snapshots.values())
         for snap in snaps:
             content = snap.content
-            out.append({
+            item = {
                 "stream_id": snap.stream_id,
                 "source": snap.source,
                 "query": snap.query,
@@ -448,7 +591,13 @@ class AgentService:
                 "done": snap.done,
                 "started_at": snap.started_at,
                 "finished_at": snap.finished_at,
-            })
+                "logical_id": snap.logical_id,
+                "retry_attempt": snap.retry_attempt,
+                "retry_max": snap.retry_max,
+                "retry_of": snap.retry_of,
+                "retry_reason": snap.retry_reason,
+            }
+            out.append(item)
         return out
 
     async def stream(self, h: StreamHandle, *, poll_interval: float = 0.4) -> AsyncIterator[dict]:

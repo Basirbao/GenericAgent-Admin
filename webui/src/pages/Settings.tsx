@@ -6,6 +6,7 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
+import type { ChatRetryConfig } from '@/api/types'
 import { PageShell } from '@/components/PageShell'
 import { useNotifyStore } from '@/utils/notify'
 
@@ -174,9 +175,89 @@ export function Settings({ initialMode = 'settings' }: { initialMode?: 'settings
           </div>
         )}
 
+        {!inSetup && <ChatRetryPanel />}
+
         {!inSetup && <NotifyPanel />}
       </div>
     </PageShell>
+  )
+}
+
+function ChatRetryPanel() {
+  const qc = useQueryClient()
+  const { data, isLoading } = useQuery({ queryKey: ['agent.chatRetryConfig'], queryFn: api.chatRetryConfig })
+  const [cfg, setCfg] = useState<ChatRetryConfig>({ enabled: true, max_attempts: 2 })
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState('')
+
+  useEffect(() => {
+    if (data) setCfg(data)
+  }, [data])
+
+  const save = async () => {
+    setSaving(true)
+    setMsg('')
+    try {
+      const saved = await api.saveChatRetryConfig({
+        enabled: !!cfg.enabled,
+        max_attempts: Math.max(0, Math.min(5, Math.floor(Number(cfg.max_attempts) || 0))),
+      })
+      setCfg(saved)
+      await qc.invalidateQueries({ queryKey: ['agent.chatRetryConfig'] })
+      setMsg('已保存')
+    } catch (e: any) {
+      setMsg(`保存失败：${e?.body?.detail || e?.message || String(e)}`)
+    } finally {
+      setSaving(false)
+      window.setTimeout(() => setMsg(''), 3500)
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-line bg-bg-card p-4">
+      <div className="text-sm font-semibold mb-1">实时聊天自动重试</div>
+      <div className="text-xs text-slate-500 mb-3">
+        当 Agent 回复末尾出现可恢复的网络/传输错误（例如 !!!Error: SSLError）时，后端会自动发起一次继续/重试请求。
+      </div>
+
+      <div className="flex items-center gap-4 flex-wrap">
+        <label className="inline-flex items-center gap-2 text-sm text-slate-300">
+          <input
+            type="checkbox"
+            checked={!!cfg.enabled}
+            onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })}
+            disabled={isLoading || saving}
+          />
+          <span>{cfg.enabled ? '已开启' : '已关闭'}</span>
+        </label>
+
+        <label className="inline-flex items-center gap-2 text-sm text-slate-300">
+          <span className="text-slate-500">最大重试次数</span>
+          <input
+            type="number"
+            min={0}
+            max={5}
+            value={cfg.max_attempts}
+            onChange={(e) => setCfg({ ...cfg, max_attempts: Number(e.target.value) })}
+            disabled={isLoading || saving || !cfg.enabled}
+            className="w-20 bg-bg-soft border border-line rounded-lg px-2 py-1 text-sm outline-none focus:border-accent disabled:opacity-50"
+          />
+        </label>
+
+        <button
+          onClick={save}
+          disabled={saving || isLoading}
+          className="px-3 py-1.5 rounded-lg bg-accent text-white text-sm disabled:opacity-40"
+        >
+          {saving ? '保存中…' : '保存'}
+        </button>
+
+        {msg && <span className={`text-xs ${msg.startsWith('保存失败') ? 'text-rose-400' : 'text-emerald-400'}`}>{msg}</span>}
+      </div>
+      <div className="text-[11px] text-slate-600 mt-2">
+        计数按同一次逻辑提交累加，达到上限后会停止并保留错误回复；非可恢复错误不会重试。
+      </div>
+    </div>
   )
 }
 
