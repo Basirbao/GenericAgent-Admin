@@ -138,6 +138,25 @@ def _ga_venv_python_candidates(ga_root: Path | None) -> list[Path]:
     return out
 
 
+def _known_python_candidates() -> list[str]:
+    candidates = [
+        "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
+        "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3",
+        "/Library/Frameworks/Python.framework/Versions/3.10/bin/python3",
+        "/opt/homebrew/bin/python3",        # Apple Silicon Homebrew
+        "/usr/local/bin/python3",           # Intel Homebrew / python.org installer
+        f"{Path.home()}/.pyenv/shims/python3",
+        "/usr/bin/python3",                 # Apple stub (last resort, no user pkgs)
+    ]
+    if os.name == "nt":
+        candidates.extend([
+            str(Path.home() / "AppData/Local/Programs/Python/Python312/python.exe"),
+            str(Path.home() / "AppData/Local/Programs/Python/Python311/python.exe"),
+            str(Path.home() / "AppData/Local/Programs/Python/Python310/python.exe"),
+        ])
+    return candidates
+
+
 def _discover_user_python_with_source(ga_root: Path | None = None) -> tuple[str | None, str]:
     target_root = ga_root or GA_ROOT
 
@@ -159,26 +178,14 @@ def _discover_user_python_with_source(ga_root: Path | None = None) -> tuple[str 
         if cand.is_file():
             return str(cand.resolve()), "ga_venv"
 
+    for cand in _known_python_candidates():
+        if Path(cand).is_file():
+            return str(Path(cand).resolve()), "known_location"
+
     for name in ("python3", "python"):
         found = shutil.which(name)
         if found:
             return str(Path(found).resolve()), f"PATH:{name}"
-
-    candidates = [
-        "/opt/homebrew/bin/python3",        # Apple Silicon Homebrew
-        "/usr/local/bin/python3",           # Intel Homebrew / python.org installer
-        f"{Path.home()}/.pyenv/shims/python3",
-        "/usr/bin/python3",                 # Apple stub (last resort, no user pkgs)
-    ]
-    if os.name == "nt":
-        candidates.extend([
-            str(Path.home() / "AppData/Local/Programs/Python/Python312/python.exe"),
-            str(Path.home() / "AppData/Local/Programs/Python/Python311/python.exe"),
-            str(Path.home() / "AppData/Local/Programs/Python/Python310/python.exe"),
-        ])
-    for cand in candidates:
-        if Path(cand).is_file():
-            return str(Path(cand).resolve()), "known_location"
     return None, "current_process"
 
 

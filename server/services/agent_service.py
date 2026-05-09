@@ -107,6 +107,19 @@ def _patch_ga_subprocess() -> None:
     def _admin_popen(*args, **kwargs):
         cmd = args[0] if args else kwargs.get("args")
         if real_python and isinstance(cmd, (list, tuple)) and cmd:
+            env = kwargs.get("env")
+            if env is None:
+                env = os.environ.copy()
+            else:
+                env = dict(env)
+            python_dir = os.path.dirname(real_python)
+            path = env.get("PATH") or ""
+            path_parts = path.split(os.pathsep) if path else []
+            if python_dir and python_dir not in path_parts:
+                env["PATH"] = python_dir + (os.pathsep + path if path else "")
+            env.setdefault("GA_PYTHON", real_python)
+            kwargs["env"] = env
+
             try:
                 cmd0 = os.path.abspath(str(cmd[0]))
             except Exception:

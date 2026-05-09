@@ -56,10 +56,11 @@ Questions to answer:
   1. `GA_PYTHON` environment variable.
   2. Saved Admin config `python_path`.
   3. Common GenericAgent virtualenvs under `GA_ROOT`: `.venv`, `venv`, `env`.
-  4. Local `python3` / `python` on `PATH`.
-  5. Known platform install locations.
+  4. Known platform install locations, including Python.org macOS framework paths.
+  5. Local `python3` / `python` on `PATH`.
   6. Only then fall back to the current process executable.
 - Runtime patching must replace GA `code_run` commands whose argv starts with Admin's `sys.executable` with the resolved external interpreter.
+- Runtime patching must prepend the resolved interpreter directory to child-process `PATH` and set `GA_PYTHON`, so shell tools such as `pip`, `pip3`, and `python3 -m pip` align with the same environment where possible.
 - In-process GA tools can import optional packages before spawning a child process. `bootstrap_sys_path()` must add the resolved external Python environment's site-packages/user-site paths so tools such as `web_scan` can import dependencies like `simple_websocket_server` from the same environment that `code_run` uses.
 - Windows runtime patching must preserve `CREATE_NO_WINDOW` while still doing interpreter replacement.
 - Do not modify the GenericAgent repository to achieve this; patch at Admin startup.
@@ -75,6 +76,7 @@ Questions to answer:
 - Base: no GA venv exists but `python3` is on `PATH` -> use `PATH:python3`.
 - Bad: packaged Admin `sys.executable` is used for SOP `code_run` while a GA venv or configured interpreter exists.
 - Bad: packaged Admin can launch external `code_run`, but in-process `web_scan` still fails importing `simple_websocket_server` because external site-packages were not added to `sys.path`.
+- Bad: GA shell `code_run` uses an unrelated `pip` from PATH, installs a dependency, and `web_scan` still cannot import it from the resolved Python environment.
 
 #### 6. Tests Required
 - Unit tests for discovery priority: env > config > GA venv > PATH.

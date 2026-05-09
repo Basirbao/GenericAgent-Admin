@@ -49,6 +49,19 @@ class PythonDiscoveryTests(unittest.TestCase):
                  mock.patch.object(_paths.shutil, "which", return_value=str(root / "system-python")):
                 self.assertEqual(_paths.discover_user_python(ga_root), str(ga_python.resolve()))
 
+    def test_discover_user_python_uses_known_location_before_path(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            known_python = _touch_python(root / "known/bin/python3")
+            path_python = _touch_python(root / "path/bin/python3")
+
+            with mock.patch.dict(_paths.os.environ, {}, clear=True), \
+                 mock.patch.object(_paths, "load_config", return_value={}), \
+                 mock.patch.object(_paths, "_ga_venv_python_candidates", return_value=[]), \
+                 mock.patch.object(_paths, "_known_python_candidates", return_value=[str(known_python)]), \
+                 mock.patch.object(_paths.shutil, "which", return_value=str(path_python)):
+                self.assertEqual(_paths._discover_user_python_with_source()[0], str(known_python.resolve()))
+
     def test_set_ga_root_rejects_bad_python_path(self):
         with TemporaryDirectory() as td:
             root = Path(td)
