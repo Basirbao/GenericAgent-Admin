@@ -223,6 +223,7 @@ function EmailSettings() {
   const [cfg, setCfg] = useState<Partial<EmailConfig> & { password?: string }>({})
   const [testTo, setTestTo] = useState('')
   const [result, setResult] = useState('')
+  const [testing, setTesting] = useState(false)
 
   const startEdit = () => {
     setCfg({
@@ -245,10 +246,36 @@ function EmailSettings() {
     setResult('已保存')
   }
   const test = async () => {
-    await api.saveTaskEmailConfig(cfg)
-    await qc.invalidateQueries({ queryKey: ['tasks.emailConfig'] })
-    const r = await api.testTaskEmail(testTo, 'GenericAgent 邮件测试', '这是一封来自 GenericAgent-Admin 的测试邮件。')
-    setResult(r.ok ? `测试邮件已发送到 ${r.to}` : `发送失败: ${r.error || 'unknown'}`)
+    if (testing) return
+    const testRecipient = testTo.trim()
+    const recipient = testRecipient || (cfg.default_to || '').trim()
+    const ok = await dialog.confirm(
+      '发送测试邮件？',
+      `将先保存当前 SMTP 配置，然后发送一封测试邮件到：\n${recipient || '默认收件人（当前未填写，可能发送失败）'}`,
+      { confirmText: '发送测试' },
+    )
+    if (!ok) return
+
+    setTesting(true)
+    setResult('')
+    try {
+      await api.saveTaskEmailConfig(cfg)
+      await qc.invalidateQueries({ queryKey: ['tasks.emailConfig'] })
+      const r = await api.testTaskEmail(testRecipient, 'GenericAgent 邮件测试', '这是一封来自 GenericAgent-Admin 的测试邮件。')
+      const msg = r.ok ? `测试邮件已发送到 ${r.to}` : `发送失败: ${r.error || 'unknown'}`
+      setResult(msg)
+      if (r.ok) {
+        await dialog.alert('测试邮件已发送', `收件人：${r.to}`)
+      } else {
+        await dialog.alert('测试邮件发送失败', r.error || 'unknown')
+      }
+    } catch (e: any) {
+      const msg = e?.body?.detail || e?.message || String(e)
+      setResult(`发送失败: ${msg}`)
+      await dialog.alert('测试邮件发送失败', msg)
+    } finally {
+      setTesting(false)
+    }
   }
 
   return (
@@ -279,7 +306,13 @@ function EmailSettings() {
             </div>
             <Field label="测试收件人（留空使用默认）"><input value={testTo} onChange={(e) => setTestTo(e.target.value)} className={inp} /></Field>
             <div className="flex justify-between gap-2 mt-4">
-              <button onClick={test} className="px-3 py-1.5 rounded-lg border border-line text-slate-300">发送测试</button>
+              <button
+                onClick={test}
+                disabled={testing}
+                className="px-3 py-1.5 rounded-lg border border-line text-slate-300 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {testing ? '发送中…' : '发送测试'}
+              </button>
               <div className="flex gap-2">
                 <button onClick={() => setEditing(false)} className="px-3 py-1.5 rounded-lg border border-line text-slate-300">取消</button>
                 <button onClick={save} className="px-3 py-1.5 rounded-lg bg-accent text-white">保存</button>
