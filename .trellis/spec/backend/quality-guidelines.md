@@ -62,6 +62,7 @@ Questions to answer:
 - Runtime patching must replace GA `code_run` commands whose argv starts with Admin's `sys.executable` with the resolved external interpreter.
 - Runtime patching must prepend the resolved interpreter directory to child-process `PATH` and set `GA_PYTHON`, so shell tools such as `pip`, `pip3`, and `python3 -m pip` align with the same environment where possible.
 - In-process GA tools can import optional packages before spawning a child process. `bootstrap_sys_path()` must add the resolved external Python environment's site-packages/user-site paths so tools such as `web_scan` can import dependencies like `simple_websocket_server` from the same environment that `code_run` uses.
+- GA browser tools (`web_scan`, `web_execute_js`) must not rely on Admin's embedded Python for `TMWebDriver` imports. Admin must proxy those calls into a stateful external Python worker using the resolved interpreter, so browser-session state is preserved and plugin/dependency installation remains owned by the GA/user environment.
 - Windows runtime patching must preserve `CREATE_NO_WINDOW` while still doing interpreter replacement.
 - Do not modify the GenericAgent repository to achieve this; patch at Admin startup.
 
@@ -70,6 +71,7 @@ Questions to answer:
 - Non-empty `python_path` that is not a file -> HTTP 400 / `ValueError`, config must not be partially written.
 - Invalid `GA_PYTHON` env or stale saved `python_path` during discovery -> log warning and continue to the next source.
 - No external interpreter found -> report `resolved_python: null`, runtime may fall back to current executable as last resort.
+- External GA web worker cannot start/import/respond -> `web_scan` / `web_execute_js` return a structured `{"status": "error", "msg": ...}` result instead of requiring Admin-packaged dependencies.
 
 #### 5. Good/Base/Bad Cases
 - Good: `GA_ROOT/.venv/bin/python3` exists and no override is set -> `resolved_python_source == "ga_venv"`.
@@ -77,11 +79,13 @@ Questions to answer:
 - Bad: packaged Admin `sys.executable` is used for SOP `code_run` while a GA venv or configured interpreter exists.
 - Bad: packaged Admin can launch external `code_run`, but in-process `web_scan` still fails importing `simple_websocket_server` because external site-packages were not added to `sys.path`.
 - Bad: GA shell `code_run` uses an unrelated `pip` from PATH, installs a dependency, and `web_scan` still cannot import it from the resolved Python environment.
+- Bad: `web_scan` imports `TMWebDriver` directly inside Admin's `.app` runtime and tells the user to install `simple_websocket_server` even though the resolved system/GA Python already has it.
 
 #### 6. Tests Required
 - Unit tests for discovery priority: env > config > GA venv > PATH.
 - Unit tests that invalid explicit `python_path` is rejected before config write.
 - Unit tests that `bootstrap_sys_path()` appends external Python site-packages.
+- Unit tests that Admin patches `web_scan` / `web_execute_js` to call the external worker with the correct tool arguments.
 - Frontend type/build check when setup/status response fields change.
 
 #### 7. Wrong vs Correct

@@ -1,5 +1,7 @@
 import json
+import importlib
 import sys
+import types
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -145,6 +147,75 @@ class ChatRetryConfigTests(unittest.TestCase):
             config = json.loads(config_file.read_text("utf-8"))
             self.assertEqual(config["ga_root"], "/tmp/ga")
             self.assertEqual(config[chat_retry.CONFIG_KEY], {"enabled": False, "max_attempts": 3})
+
+
+class AgentServiceWebToolPatchTests(unittest.TestCase):
+    def _load_agent_service_with_fake_ga(self, ga_root: Path, python_path: str = "/usr/bin/python3"):
+        fake_ga = types.SimpleNamespace()
+
+        def web_scan(**_kwargs):
+            return {"status": "in-process"}
+
+        def web_execute_js(*_args, **_kwargs):
+            return {"status": "in-process"}
+
+        fake_ga.web_scan = web_scan
+        fake_ga.web_execute_js = web_execute_js
+        fake_ga.subprocess = types.SimpleNamespace(Popen=lambda *_args, **_kwargs: None)
+
+        fake_agentmain = types.ModuleType("agentmain")
+        fake_agentmain.GeneraticAgent = type("GeneraticAgent", (), {})
+
+        fake_continue = types.ModuleType("frontends.continue_cmd")
+        fake_continue.install = lambda *_args, **_kwargs: None
+        fake_continue.reset_conversation = lambda *_args, **_kwargs: None
+
+        modules = {
+            "ga": fake_ga,
+            "agentmain": fake_agentmain,
+            "frontends": types.ModuleType("frontends"),
+            "frontends.continue_cmd": fake_continue,
+        }
+        with mock.patch.object(_paths, "GA_ROOT", ga_root), \
+             mock.patch.object(_paths, "discover_user_python", return_value=python_path), \
+             mock.patch.dict(sys.modules, modules):
+            sys.modules.pop("server.services.agent_service", None)
+            svc = importlib.import_module("server.services.agent_service")
+        return svc, fake_ga
+
+    def test_patch_ga_web_tools_proxies_calls_to_external_worker(self):
+        with TemporaryDirectory() as td:
+            ga_root = Path(td)
+            calls = []
+
+            class FakeWorker:
+                def __init__(self, python, root):
+                    self.python = python
+                    self.root = root
+
+                def call(self, tool, args):
+                    calls.append((tool, args, self.python, self.root))
+                    return {"status": "success", "tool": tool}
+
+            svc, fake_ga = self._load_agent_service_with_fake_ga(ga_root, "/tmp/ga-python")
+            fake_ga.web_scan = lambda **_kwargs: {"status": "in-process"}
+            fake_ga.web_execute_js = lambda *_args, **_kwargs: {"status": "in-process"}
+            with mock.patch.object(svc, "_ExternalGaWebTools", FakeWorker), \
+                 mock.patch.object(_paths, "GA_ROOT", ga_root), \
+                 mock.patch.object(_paths, "discover_user_python", return_value="/tmp/ga-python"), \
+                 mock.patch.dict(sys.modules, {"ga": fake_ga}):
+                svc._patch_ga_web_tools()
+
+            self.assertEqual(fake_ga.web_scan(tabs_only=True, switch_tab_id="tab-1", text_only=True)["tool"], "web_scan")
+            self.assertEqual(fake_ga.web_execute_js("return 1", switch_tab_id="tab-2", no_monitor=True)["tool"], "web_execute_js")
+            self.assertEqual(calls[0], (
+                "web_scan",
+                {"tabs_only": True, "switch_tab_id": "tab-1", "text_only": True},
+                "/tmp/ga-python",
+                ga_root,
+            ))
+            self.assertEqual(calls[1][0], "web_execute_js")
+            self.assertEqual(calls[1][1]["script"], "return 1")
 
 
 if __name__ == "__main__":
