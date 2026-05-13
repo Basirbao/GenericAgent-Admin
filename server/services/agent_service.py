@@ -273,8 +273,7 @@ class _ExternalGaWebTools:
                 env["PATH"] = python_dir + (os.pathsep + path if path else "")
 
         self._responses.clear()
-        self._proc = subprocess.Popen(
-            [self.python, "-u", "-c", _WEB_TOOL_WORKER_SCRIPT],
+        popen_kwargs: dict = dict(
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -282,6 +281,12 @@ class _ExternalGaWebTools:
             bufsize=1,
             cwd=str(self.ga_root),
             env=env,
+        )
+        if sys.platform == "win32":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        self._proc = subprocess.Popen(
+            [self.python, "-u", "-c", _WEB_TOOL_WORKER_SCRIPT],
+            **popen_kwargs,
         )
         threading.Thread(target=self._read_stdout, args=(self._proc,), daemon=True, name="ga-web-worker-out").start()
         threading.Thread(target=self._read_stderr, args=(self._proc,), daemon=True, name="ga-web-worker-err").start()

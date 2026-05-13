@@ -44,13 +44,15 @@ def _spawn(cmd: list[str], *, wait_sec: float = 4.0) -> bool:
     """Run a notifier command. ``wait_sec=0`` fires-and-forgets (used for
     Windows balloon since it self-sleeps to keep the icon alive)."""
     try:
-        proc = subprocess.Popen(
-            cmd,
+        popen_kwargs: dict = dict(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             close_fds=(sys.platform != "win32"),
         )
+        if sys.platform == "win32":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        proc = subprocess.Popen(cmd, **popen_kwargs)
         if wait_sec <= 0:
             return True
         try:
